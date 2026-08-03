@@ -3,7 +3,7 @@ import { MouseMode, MouseScrollMode, TouchMode } from "../stream/input"
 import { PageStyle } from "../styles/index"
 import { getLanguageOptions, getTranslations, Language, normalizeLanguage } from "../i18n"
 import { Component, ComponentEvent } from "./index"
-import { InputComponent } from "./input"
+import { ShadcnInputComponent as InputComponent } from "../ui/shadcn-input"
 import { ShadcnSelectComponent as SelectComponent } from "../ui/shadcn-select"
 import { SidebarEdge } from "./sidebar/index"
 import { StreamPermissions } from "../api_bindings";

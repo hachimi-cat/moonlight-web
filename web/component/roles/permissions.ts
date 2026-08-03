@@ -1,7 +1,7 @@
 import { StreamPermissions } from "../../api_bindings"
 import { getCurrentLanguage, getTranslations } from "../../i18n"
 import { Component, ComponentEvent } from "../index"
-import { InputComponent } from "../input"
+import { ShadcnInputComponent as InputComponent } from "../../ui/shadcn-input"
 
 export function defaultRolePermissions(): StreamPermissions {
     return {

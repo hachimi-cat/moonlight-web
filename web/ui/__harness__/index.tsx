@@ -8,6 +8,7 @@
  * It proves rendering and styling, NOT integration.
  */
 import { ShadcnSelectComponent } from "../shadcn-select"
+import { ShadcnInputComponent } from "../shadcn-input"
 
 const app = document.getElementById("app")!
 
@@ -72,11 +73,74 @@ const nothingChosen = new ShadcnSelectComponent(
 )
 nothingChosen.mount(input)
 
+const fullscreen = new ShadcnInputComponent(
+    "enterFullscreen",
+    "checkbox",
+    "Enter fullscreen on stream start",
+    { checked: true },
+)
+fullscreen.mount(input)
+
+const localCursor = new ShadcnInputComponent("playAudioLocal", "checkbox", "Play audio locally")
+localCursor.mount(input)
+
+const numbers = panel("Bitrate & queues")
+
+const bitrate = new ShadcnInputComponent("bitrate", "number", "Bitrate (Mbps)", {
+    value: "25",
+    step: "5",
+    numberSlider: { range_min: 5, range_max: 150 },
+})
+bitrate.mount(numbers)
+
+const queue = new ShadcnInputComponent("videoFrameQueueSize", "number", "Video frame queue", {
+    value: "2",
+    step: "1",
+    numberSlider: { range_min: 0, range_max: 16 },
+})
+queue.mount(numbers)
+
+const plain = new ShadcnInputComponent("customPort", "number", "Custom port (plain number)", {
+    value: "47989",
+})
+plain.mount(numbers)
+
+const guarded = new ShadcnInputComponent("overrideFps", "number", "Override fps (off by default)", {
+    value: "60",
+    hasEnableCheckbox: true,
+    numberSlider: { range_min: 30, range_max: 120 },
+})
+guarded.mount(numbers)
+
+const text = panel("Text & file")
+
+const host = new ShadcnInputComponent("hostName", "text", "Host name", {
+    placeholer: "gaming-rig.local",
+})
+host.mount(text)
+
+const password = new ShadcnInputComponent("password", "password", "Password", {
+    formRequired: true,
+})
+password.mount(text)
+
+const file = new ShadcnInputComponent("passwordFile", "file", "Password as file", {
+    accept: ".txt",
+})
+file.mount(text)
+
 // Echo changes so the harness proves the ml-change event still fires with the
 // same shape the vanilla component used.
 const log = document.getElementById("log")!
 for (const c of [codec, size, transport, nothingChosen]) {
     c.addChangeListener(() => {
         log.innerText = `ml-change -> ${c.getValue()}`
+    })
+}
+
+for (const c of [fullscreen, localCursor, bitrate, queue, plain, guarded, host, password]) {
+    c.addChangeListener(() => {
+        const v = c.isChecked() ? "checked" : c.getValue()
+        log.innerText = `ml-change -> ${v} (enabled=${c.isEnabled()})`
     })
 }

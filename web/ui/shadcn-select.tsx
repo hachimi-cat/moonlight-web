@@ -2,7 +2,8 @@ import * as React from "react"
 import { createRoot, type Root } from "react-dom/client"
 
 import { ComponentEvent } from "../component/index"
-import { ElementWithLabel, type SelectInit, type InputChangeListener } from "../component/input"
+import { ElementWithLabel } from "../component/element_with_label"
+import { type SelectInit, type InputChangeListener } from "../component/input"
 import { getCurrentLanguage, getTranslations } from "../i18n"
 import {
     Select,
