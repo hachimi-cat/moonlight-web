@@ -56,6 +56,41 @@
 }
 
 /*
+ * Without Preflight, form controls keep their NATIVE appearance — a <button>
+ * renders as a grey OS button unless every component remembers to override
+ * it. The toast dismiss button shipped looking like a native box for exactly
+ * this reason.
+ *
+ * Declared in the `components` layer, which the @layer statement above orders
+ * BEFORE `utilities`. That matters: as a bare element selector this would
+ * otherwise out-specify the single-class Tailwind utilities (0,1,1 vs 0,1,0)
+ * and stomp every `bg-*`/`border-*` a component sets — the select trigger
+ * included. Layer order decides it instead of specificity, so utilities win.
+ */
+@layer components {
+    .pw-root button,
+    [data-radix-popper-content-wrapper] button,
+    [data-pw-portal] button {
+        appearance: none;
+        background-color: transparent;
+        background-image: none;
+        border: 0;
+        margin: 0;
+        padding: 0;
+        font: inherit;
+        color: inherit;
+        text-align: inherit;
+        cursor: pointer;
+    }
+
+    .pw-root input,
+    [data-pw-portal] input {
+        font: inherit;
+        color: inherit;
+    }
+}
+
+/*
  * Radix portals render OUTSIDE the island (document.body), so they would lose
  * the baseline above. Radix tags every portalled surface with a data
  * attribute; re-apply there.

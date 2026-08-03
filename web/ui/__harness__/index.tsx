@@ -144,3 +144,11 @@ for (const c of [fullscreen, localCursor, bitrate, queue, plain, guarded, host, 
         log.innerText = `ml-change -> ${v} (enabled=${c.isEnabled()})`
     })
 }
+
+// Notifications: fire one of each level so the toast stack can be seen and
+// its dismiss/auto-expiry behaviour exercised.
+import { showNotification } from "../../component/notification"
+
+showNotification("Lost connection to the host. Retrying…", "error")
+showNotification("H.265 is not supported by this browser; fell back to H.264.", "warn")
+showNotification("Paired with pawpado-browser.", "info")
