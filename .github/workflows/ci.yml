@@ -90,8 +90,12 @@ jobs:
       uses: cargo-bins/cargo-binstall@main
     - name: Install Cross
       run: cargo binstall --force cross
+    # Pinned: the CLI must match the wasm-bindgen CRATE version in
+    # rust_modules/wasm/Cargo.lock, which `ubrn checkout` writes during
+    # `npm run build` — i.e. after this step, so it cannot be read here.
+    # Unpinned `latest` drifts away from the lock with no warning.
     - name: Install Wasm-Bindgen
-      run: cargo binstall --force wasm-bindgen-cli
+      run: cargo binstall --force wasm-bindgen-cli --version 0.2.122
   
     # Build
     - name: Build
@@ -165,7 +169,9 @@ jobs:
       - name: Create archive
         run: |
           mkdir package
-          mv dist/streamer${{ matrix.suffix }} package/
+          # No `streamer` binary since the stream rework collapsed the
+          # workspace into the single web-server crate (upstream left this
+          # mv behind; it would fail the first tagged release).
           mv dist/web-server${{ matrix.suffix }} package/
           mv dist/static package/
 
