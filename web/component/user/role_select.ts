@@ -1,6 +1,6 @@
 import { UndetailedRole } from "../../api_bindings"
 import { getCurrentLanguage, getTranslations } from "../../i18n"
-import { SelectComponent } from "../input"
+import { ShadcnSelectComponent as SelectComponent } from "../../ui/shadcn-select"
 import { formatRoleName } from "../roles/index"
 
 export function createSelectRoleInput(roles: Array<UndetailedRole>, preselectedId?: number): SelectComponent {

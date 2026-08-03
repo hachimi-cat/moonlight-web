@@ -1,0 +1,76 @@
+/*
+ * Tailwind for the React (shadcn) islands ONLY.
+ *
+ * Deliberately imports theme + utilities but NOT `base`. Tailwind's base
+ * layer is Preflight, a global reset — it would strip the margins, list
+ * styles, heading sizes and form-control appearance that the existing
+ * vanilla-TS UI in web/styles/*.css depends on. The two style systems have
+ * to coexist in the same document, so the new one does not get to reset it.
+ *
+ * Consequence: React components here cannot assume a normalised baseline.
+ * Set what you need explicitly (box-sizing, font, line-height) on the island
+ * root — see `.pw-root` below.
+ */
+@layer theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* Tailwind v4 scans for class names; be explicit about where ours live. */
+@source "./";
+
+@theme {
+    /* Pawpado surface palette — dark, matched to the stream overlay so the
+     * React panels read as part of the player rather than a web page. */
+    --color-pw-bg: oklch(0.18 0.012 260);
+    --color-pw-surface: oklch(0.23 0.014 260);
+    --color-pw-surface-2: oklch(0.28 0.016 260);
+    --color-pw-border: oklch(0.36 0.018 260);
+    --color-pw-fg: oklch(0.96 0.004 260);
+    --color-pw-muted: oklch(0.72 0.012 260);
+    --color-pw-accent: oklch(0.72 0.17 145);
+    --color-pw-accent-fg: oklch(0.16 0.02 145);
+    --color-pw-danger: oklch(0.62 0.21 25);
+
+    --radius-pw: 0.625rem;
+}
+
+/*
+ * Island root. Every React mount point gets this class, so the island has a
+ * predictable baseline without a global reset leaking into the vanilla UI.
+ */
+.pw-root,
+.pw-root *,
+.pw-root *::before,
+.pw-root *::after {
+    box-sizing: border-box;
+}
+
+.pw-root {
+    color: var(--color-pw-fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        sans-serif;
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Radix portals render OUTSIDE the island (document.body), so they would lose
+ * the baseline above. Radix tags every portalled surface with a data
+ * attribute; re-apply there.
+ */
+[data-radix-popper-content-wrapper],
+[data-pw-portal] {
+    box-sizing: border-box;
+    color: var(--color-pw-fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        sans-serif;
+    font-size: 0.9375rem;
+    line-height: 1.5;
+}
+
+[data-radix-popper-content-wrapper] *,
+[data-pw-portal] * {
+    box-sizing: border-box;
+}

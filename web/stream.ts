@@ -7,7 +7,7 @@ import { getModalBackground, Modal, showMessage, showModal } from "./component/m
 import { getSidebarRoot, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index"
 import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig } from "./stream/input"
 import { getLocalStreamSettings, Settings, TransportType } from "./component/settings_menu"
-import { SelectComponent } from "./component/input"
+import { ShadcnSelectComponent as SelectComponent } from "./ui/shadcn-select"
 import { emptyKeyModifiers } from "./stream/keyboard"
 import { LogLevel, setLogger as uniffiSetLogger, Logger as UniffiLogger, uniffiInitAsync } from "./uniffi/entry"
 import { DetailedRole, StreamKeys } from "./api_bindings"
