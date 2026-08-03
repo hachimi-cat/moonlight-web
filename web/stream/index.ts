@@ -16,6 +16,7 @@ import { allVideoCodecs, andVideoCodecs, emptyVideoCodecs, hasAnyCodec } from ".
 import { VideoRenderer, VideoRendererSetup } from "./video/index"
 import { buildVideoPipeline, queryVideoPipelineInfo, VideoPipelineOptions } from "./video/pipeline"
 import { StreamPermissions } from "../api_bindings"
+import { gamepadLaunchSettings } from "./gamepad"
 
 export type ExecutionEnvironment = {
     main: boolean
@@ -205,6 +206,12 @@ export class Stream implements Component {
             return null
         }
 
+        const connectedGamepads = Array.from(navigator.getGamepads()).filter(gamepad => gamepad != null).length
+        const gamepads = gamepadLaunchSettings(
+            this.settings.controllerConfig.multiControllerMode,
+            connectedGamepads,
+        )
+
         return {
             hostId: this.hostId,
             appId: this.appId,
@@ -214,6 +221,8 @@ export class Stream implements Component {
             bitrate: this.settings.bitrate,
             hdr: this.settings.hdr,
             localAudioPlayMode: this.settings.playAudioLocal,
+            gamepadsAttached: gamepads.attachedMask,
+            gamepadsPersistAfterDisconnect: gamepads.persistAfterDisconnect,
             supportedCodecs: dataCodecs,
             preferredCodecs: codecHint,
         }
@@ -260,7 +269,10 @@ export class Stream implements Component {
 
             // Send Request
             this.debugLog("Sending Offer and waiting for Answer")
-            const answer = await apiWebRTCOffer(this.api, offer)
+            const answer = await apiWebRTCOffer(this.api, offer, {
+                attached: options.gamepadsAttached,
+                persistAfterDisconnect: options.gamepadsPersistAfterDisconnect,
+            })
             this.debugLog("Got Response")
 
             // Apply answer

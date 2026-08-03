@@ -27,7 +27,7 @@ actix-ws = "0.4.0"
 
 # Moonlight
 # Make sure to keep the ubrn.config.yaml repo the same as this
-moonlight-common = { git = "https://github.com/MrCreativ3001/moonlight-common-rust.git", rev = "32c6b1eeae2e7904172cee4cfe0c2b532f7ed627", features = [
+moonlight-common = { git = "https://github.com/hachimi-cat/moonlight-common-rust.git", rev = "3b4b4d10359e437f63b39824e897c2dbfa9f1ddc", features = [
     "tokio",
     "tokio-hyper",
     "rustcrypto",

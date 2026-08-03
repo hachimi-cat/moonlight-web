@@ -493,10 +493,20 @@ export type WebRTCAnswer = {
     location: string | null,
 }
 
-export async function apiWebRTCOffer(api: Api, offerSdp: string): Promise<WebRTCAnswer> {
+export async function apiWebRTCOffer(
+    api: Api,
+    offerSdp: string,
+    gamepads: { attached: number, persistAfterDisconnect: boolean },
+): Promise<WebRTCAnswer> {
     const ENDPOINT = "/host/stream/webrtc"
 
-    const [url, request] = buildRequest(api, ENDPOINT, POST, { sdp: offerSdp })
+    const [url, request] = buildRequest(api, ENDPOINT, POST, {
+        sdp: offerSdp,
+        query: {
+            gamepads_attached: gamepads.attached,
+            gamepads_persist_after_disconnect: gamepads.persistAfterDisconnect,
+        },
+    })
 
     let response
     try {

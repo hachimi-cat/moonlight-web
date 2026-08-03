@@ -427,6 +427,10 @@ pub struct WebSocketStreamRequest {
     pub bitrate: u32,
     pub hdr: bool,
     pub local_audio_play_mode: bool,
+    #[serde(default)]
+    pub gamepads_attached: u16,
+    #[serde(default)]
+    pub gamepads_persist_after_disconnect: bool,
     pub supported_codecs: u32,
     pub preferred_codecs: u32,
 }

@@ -165,8 +165,8 @@ async fn handle_ws(
         color_range: ColorRange::Limited,
         local_audio_play_mode: stream_request.local_audio_play_mode,
         audio_config: AudioConfig::STEREO,
-        gamepads_attached: ActiveGamepads::empty(),
-        gamepads_persist_after_disconnect: false,
+        gamepads_attached: ActiveGamepads::from_bits_retain(stream_request.gamepads_attached),
+        gamepads_persist_after_disconnect: stream_request.gamepads_persist_after_disconnect,
         // TODO: mic?
         enable_mic: false,
     };

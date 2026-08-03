@@ -24,6 +24,8 @@ export type TransportOptions = {
     bitrate: number,
     hdr: boolean,
     localAudioPlayMode: boolean,
+    gamepadsAttached: number,
+    gamepadsPersistAfterDisconnect: boolean,
     /// These are the available video codecs when using data transport
     supportedCodecs: VideoFormats,
     preferredCodecs?: VideoFormats,

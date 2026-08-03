@@ -4,7 +4,37 @@ import { deepEqual } from "../util"
 export type ControllerConfig = {
     invertXY: boolean
     invertAB: boolean
+    multiControllerMode: MultiControllerMode
     sendIntervalOverride: number | null
+}
+
+export type MultiControllerMode = "auto" | "single"
+
+export type GamepadLaunchSettings = {
+    attachedMask: number
+    persistAfterDisconnect: boolean
+}
+
+/**
+ * Controller state that must be present in the Moonlight launch request.
+ *
+ * Apollo assigns a GLOBAL virtual-controller id for every controller in each
+ * stream's LOCAL mask. Two browser streams may therefore both call their
+ * first pad controller 0; Apollo maps them to different XInput devices.
+ */
+export function gamepadLaunchSettings(
+    mode: MultiControllerMode,
+    connectedGamepads: number,
+): GamepadLaunchSettings {
+    if (mode == "single") {
+        // Match native Moonlight's Single mode: controller 1 is present even
+        // before a physical pad is connected, for games that scan only once.
+        return { attachedMask: 1, persistAfterDisconnect: true }
+    }
+
+    const count = Math.max(0, Math.min(16, Math.floor(connectedGamepads)))
+    const attachedMask = count == 16 ? 0xffff : (1 << count) - 1
+    return { attachedMask, persistAfterDisconnect: false }
 }
 
 // https://w3c.github.io/gamepad/#remapping
@@ -150,6 +180,35 @@ export function areGamepadStatesEqual(a: GamepadState, b: GamepadState): boolean
         && areFloatsEqual(a.leftStickY, b.leftStickY)
         && areFloatsEqual(a.rightStickX, b.rightStickX)
         && areFloatsEqual(a.rightStickY, b.rightStickY)
+}
+
+/** Merge physical pads into Moonlight's single virtual controller. */
+export function mergeGamepadStates(states: readonly GamepadState[]): GamepadState {
+    const merged = emptyGamepadState()
+
+    for (const state of states) {
+        for (const button of Object.keys(merged.buttonFlags) as Array<keyof ControllerButtons>) {
+            merged.buttonFlags[button] ||= state.buttonFlags[button]
+        }
+
+        merged.leftTrigger = Math.max(merged.leftTrigger, state.leftTrigger)
+        merged.rightTrigger = Math.max(merged.rightTrigger, state.rightTrigger)
+
+        if (stickMagnitude(state.leftStickX, state.leftStickY) > stickMagnitude(merged.leftStickX, merged.leftStickY)) {
+            merged.leftStickX = state.leftStickX
+            merged.leftStickY = state.leftStickY
+        }
+        if (stickMagnitude(state.rightStickX, state.rightStickY) > stickMagnitude(merged.rightStickX, merged.rightStickY)) {
+            merged.rightStickX = state.rightStickX
+            merged.rightStickY = state.rightStickY
+        }
+    }
+
+    return merged
+}
+
+function stickMagnitude(x: number, y: number): number {
+    return x * x + y * y
 }
 
 const FLOAT_COMPARE_MULTIPLIER = 100

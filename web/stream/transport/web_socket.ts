@@ -150,6 +150,8 @@ export class WebSocketTransport implements Transport {
                 bitrate: options.bitrate,
                 hdr: options.hdr,
                 local_audio_play_mode: options.localAudioPlayMode,
+                gamepads_attached: options.gamepadsAttached,
+                gamepads_persist_after_disconnect: options.gamepadsPersistAfterDisconnect,
                 supported_codecs: createSupportedVideoFormatsBits(options.supportedCodecs),
                 preferred_codecs: options.preferredCodecs ? createSupportedVideoFormatsBits(options.preferredCodecs) : 0,
             }

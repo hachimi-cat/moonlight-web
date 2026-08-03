@@ -111,6 +111,11 @@ export function setLocalStreamSettings(settings?: Settings) {
 export type StreamSettingsChangeListener = (event: ComponentEvent<StreamSettingsComponent>) => void
 
 function makeSettingsValid(permissions: StreamPermissions, settings: Settings) {
+    if (settings.controllerConfig.multiControllerMode != "auto"
+        && settings.controllerConfig.multiControllerMode != "single") {
+        settings.controllerConfig.multiControllerMode = globalDefaultSettings().controllerConfig.multiControllerMode
+    }
+
     if (permissions.maximum_bitrate_kbps != null && permissions.maximum_bitrate_kbps < settings.bitrate) {
         settings.bitrate = permissions.maximum_bitrate_kbps
     }
@@ -177,6 +182,7 @@ export class StreamSettingsComponent implements Component {
     private localCursorSensitivity: InputComponent
 
     private controllerHeader: HTMLHeadingElement = document.createElement("h3")
+    private controllerMode: SelectComponent
     private controllerInvertAB: InputComponent
     private controllerInvertXY: InputComponent
     private controllerSendIntervalOverride: InputComponent
@@ -469,6 +475,19 @@ export class StreamSettingsComponent implements Component {
         }
         this.divElement.appendChild(this.controllerHeader)
 
+        this.controllerMode = new SelectComponent("multiControllerMode",
+            [
+                { value: "auto", name: i.multiControllerAuto },
+                { value: "single", name: i.multiControllerSingle }
+            ],
+            {
+                displayName: i.multiControllerMode,
+                preSelectedOption: settings?.controllerConfig?.multiControllerMode ?? defaultSettings_.controllerConfig.multiControllerMode
+            }
+        )
+        this.controllerMode.addChangeListener(this.onSettingsChange.bind(this))
+        this.controllerMode.mount(this.divElement)
+
         this.controllerInvertAB = new InputComponent("controllerInvertAB", "checkbox", i.invertAB, {
             checked: settings?.controllerConfig?.invertAB
         })
@@ -614,6 +633,7 @@ export class StreamSettingsComponent implements Component {
 
         settings.controllerConfig.invertAB = this.controllerInvertAB.isChecked()
         settings.controllerConfig.invertXY = this.controllerInvertXY.isChecked()
+        settings.controllerConfig.multiControllerMode = this.controllerMode.getValue() as ControllerConfig["multiControllerMode"]
         if (this.controllerSendIntervalOverride.isEnabled()) {
             settings.controllerConfig.sendIntervalOverride = parseInt(this.controllerSendIntervalOverride.getValue())
         } else {

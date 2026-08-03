@@ -7,7 +7,7 @@ use actix_web::HttpRequest;
 use actix_web::body::{BoxBody, MessageBody};
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
-use actix_web::web::{Data, Path};
+use actix_web::web::{Data, Path, Query};
 use actix_web::{
     HttpResponse, HttpResponseBuilder, delete, get, http::StatusCode, http::header, options, patch,
     post,
@@ -29,6 +29,7 @@ use moonlight_common::webrtc::answer::WebRTCSessionAnswer;
 use moonlight_common::webrtc::header::WebRTCLinkHeader;
 use moonlight_common::webrtc::offer::WebRTCSessionOffer;
 use moonlight_common::webrtc::sdp::Session;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +67,14 @@ mod convert;
 mod ice_servers;
 mod stream;
 mod video;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WebRtcGamepadQuery {
+    #[serde(default)]
+    gamepads_attached: u16,
+    #[serde(default)]
+    gamepads_persist_after_disconnect: bool,
+}
 
 pub async fn webrtc_middleware(
     mut req: ServiceRequest,
@@ -200,11 +209,12 @@ fn create_media_engine(video_formats: &HashMap<VideoFormat, RTCRtpCodecParameter
 }
 
 #[post("")]
-#[instrument(skip(app, user, req, session_description), fields(user = %user.id()))]
+#[instrument(skip(app, user, req, gamepads, session_description), fields(user = %user.id()))]
 pub async fn webrtc_post(
     app: Data<App>,
     mut user: AuthenticatedUser,
     req: HttpRequest,
+    gamepads: Query<WebRtcGamepadQuery>,
     session_description: String,
 ) -> Result<HttpResponse, AppError> {
     if !user
@@ -364,8 +374,8 @@ pub async fn webrtc_post(
         local_audio_play_mode: session.local_audio_play_mode,
         // TODO: what audio config?
         audio_config: AudioConfig::STEREO,
-        gamepads_attached: ActiveGamepads::empty(),
-        gamepads_persist_after_disconnect: false,
+        gamepads_attached: ActiveGamepads::from_bits_retain(gamepads.gamepads_attached),
+        gamepads_persist_after_disconnect: gamepads.gamepads_persist_after_disconnect,
         enable_mic: microphone_enabled,
     };
 
