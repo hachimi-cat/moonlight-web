@@ -5,6 +5,7 @@ import { ComponentEvent } from "../component/index"
 import { ElementWithLabel } from "../component/element_with_label"
 import { type SelectInit, type InputChangeListener } from "../component/input"
 import { getCurrentLanguage, getTranslations } from "../i18n"
+import { styleControlLabel } from "./lib/label"
 import {
     Select,
     SelectContent,
@@ -74,7 +75,8 @@ export class ShadcnSelectComponent extends ElementWithLabel {
         this.preSelectedOption = init?.preSelectedOption ?? ""
         this.value = this.preSelectedOption
 
-        this.div.classList.add("pw-root")
+        this.div.classList.add("pw-root", "mb-3")
+        styleControlLabel(this.label)
         this.host.classList.add("pw-select")
         this.div.appendChild(this.host)
 

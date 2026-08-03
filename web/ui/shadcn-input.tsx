@@ -7,6 +7,7 @@ import { type InputInit, type InputChangeListener } from "../component/input"
 import { Input } from "./components/input"
 import { Slider } from "./components/slider"
 import { Switch } from "./components/switch"
+import { styleControlLabel } from "./lib/label"
 import "./tailwind.tw.css"
 
 /*
@@ -66,7 +67,8 @@ export class ShadcnInputComponent extends ElementWithLabel {
             placeholder: init?.placeholer ?? "",
         }
 
-        this.div.classList.add("pw-root")
+        this.div.classList.add("pw-root", "mb-3")
+        styleControlLabel(this.label)
         this.div.appendChild(this.host)
 
         this.root = createRoot(this.host)

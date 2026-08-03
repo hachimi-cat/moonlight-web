@@ -152,3 +152,29 @@ import { showNotification } from "../../component/notification"
 showNotification("Lost connection to the host. Retrying…", "error")
 showNotification("H.265 is not supported by this browser; fell back to H.264.", "warn")
 showNotification("Paired with pawpado-browser.", "info")
+
+// The REAL settings panel, constructed with a permissive role. This is the
+// component customers actually see in the stream sidebar — far better as a
+// visual check than the hand-built panels above.
+import { StreamSettingsComponent, globalDefaultSettings } from "../../component/settings_menu"
+import type { StreamPermissions } from "../../api_bindings"
+
+const permissions: StreamPermissions = {
+    allow_add_hosts: true,
+    maximum_bitrate_kbps: null,
+    allow_codec_h264: true,
+    allow_codec_h265: true,
+    allow_codec_av1: true,
+    allow_hdr: true,
+    allow_transport_webrtc: true,
+    allow_transport_websockets: true,
+}
+
+const realPanel = document.createElement("section")
+realPanel.className = "panel panel-wide"
+const realHeading = document.createElement("h2")
+realHeading.innerText = "Real stream settings panel"
+realPanel.appendChild(realHeading)
+app.appendChild(realPanel)
+
+new StreamSettingsComponent(permissions, globalDefaultSettings()).mount(realPanel)

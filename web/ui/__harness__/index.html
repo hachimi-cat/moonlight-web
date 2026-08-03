@@ -44,6 +44,14 @@
             width: 320px;
         }
 
+        /* The real settings panel is taller than the synthetic ones; give it
+           the sidebar's width and let it scroll like it does in the stream. */
+        .panel-wide {
+            width: 380px;
+            max-height: 78vh;
+            overflow-y: auto;
+        }
+
         .panel h2 {
             font-size: .8125rem;
             text-transform: uppercase;
