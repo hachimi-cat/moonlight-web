@@ -31,7 +31,12 @@ export type InfoEvent = CustomEvent<
     { type: "app", appName: string } |
     { type: "connectionComplete", capabilities: StreamCapabilities } |
     { type: "videoReady" } |
-    { type: "addDebugLine", line: string, additional?: LogMessageInfo }
+    { type: "addDebugLine", line: string, additional?: LogMessageInfo } |
+    // A stream that WAS up has ended. `graceful` distinguishes the host
+    // closing the app (quit — the page may auto-close on it) from the
+    // connection dying underneath a live stream (the page must say so,
+    // and closing the tab would destroy the evidence).
+    { type: "streamEnded", graceful: boolean }
 >
 export type InfoEventListener = (event: InfoEvent) => void
 
@@ -165,17 +170,32 @@ export class Stream implements Component {
         const desiredTransport = this.transportOverride ?? this.settings.dataTransport
         this.debugLog(`Using transport: ${desiredTransport}`)
 
+        let shutdown: TransportShutdown | undefined
         if (desiredTransport == "auto") {
-            let shutdownReason = await this.tryWebRTCTransport()
+            shutdown = await this.tryWebRTCTransport()
 
-            if (shutdownReason == "failednoconnect") {
+            if (shutdown == "failednoconnect") {
                 this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" })
-                await this.tryWebSocketTransport()
+                shutdown = await this.tryWebSocketTransport()
             }
         } else if (desiredTransport == "webrtc") {
-            await this.tryWebRTCTransport()
+            shutdown = await this.tryWebRTCTransport()
         } else if (desiredTransport == "websocket") {
-            await this.tryWebSocketTransport()
+            shutdown = await this.tryWebSocketTransport()
+        }
+
+        // "disconnect"/"failed" only come out of a transport's onclose, and
+        // the try functions return that promise strictly AFTER onConnect ran
+        // — so reaching here with either means a live stream ENDED, which is
+        // not the "could not connect" story the fatal modal below tells.
+        // Before this branch a host quitting the game surfaced as "Tried all
+        // configured transport options but no connection was possible".
+        if (shutdown == "disconnect" || shutdown == "failed") {
+            const event: InfoEvent = new CustomEvent("stream-info", {
+                detail: { type: "streamEnded", graceful: shutdown == "disconnect" }
+            })
+            this.eventTarget.dispatchEvent(event)
+            return
         }
 
         this.debugLog("Tried all configured transport options but no connection was possible", { type: "fatal" })

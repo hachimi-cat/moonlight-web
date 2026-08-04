@@ -3,7 +3,7 @@ import "./styles/index"
 import { Api, apiGetRole, getApi } from "./api"
 import { Component } from "./component/index"
 import { showNotification } from "./component/notification"
-import { getModalBackground, Modal, showMessage, showModal } from "./component/modal/index"
+import { getModalBackground, showMessage, showModal } from "./component/modal/index"
 import { getSidebarRoot, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index"
 import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig } from "./stream/input"
 import { getLocalStreamSettings, Settings, TransportType } from "./component/settings_menu"
@@ -17,7 +17,7 @@ import { streamStatsToText } from "./stream/stats"
 import { adoptRoleDefaultLanguage, getCurrentLanguage, getTranslations, Language, normalizeLanguage } from "./i18n"
 import { requestKeyboardLock } from "./iframe"
 import { InfoEvent, Stream, StreamCapabilities } from "./stream/index"
-import { LogMessageType } from "./stream/log"
+import { ConnectionInfoModal } from "./component/connection_info_modal"
 
 let I = getTranslations(getCurrentLanguage())
 
@@ -327,6 +327,24 @@ class ViewerApp implements Component {
             this.sidebar.onCapabilitiesChange(data.capabilities)
 
             this.armFullscreenOnNextInteraction()
+        } else if (data.type == "streamEnded") {
+            // Quit-the-game closes the tab, but ONLY when the embedder asked
+            // for it (?autoclose=1) and only on a graceful end — a dropped
+            // connection closing the tab would destroy the one screen that
+            // can tell the player what happened. pawpado's game tiles pass
+            // the flag; its Open Desktop button does not.
+            const autoClose = new URLSearchParams(window.location.search).get("autoclose") == "1"
+            if (data.graceful && autoClose) {
+                if (window.matchMedia('(display-mode: standalone)').matches) {
+                    history.back()
+                } else {
+                    window.close()
+                }
+            }
+            // Reached when we didn't close — including a window.close() the
+            // browser refused. Without this the player is left staring at
+            // the frozen last frame.
+            await showMessage(data.graceful ? I.stream.streamEnded : I.stream.connectionLost)
         }
     }
 
@@ -889,115 +907,6 @@ class ViewerApp implements Component {
     }
     getStream(): Stream | null {
         return this.stream
-    }
-}
-
-class ConnectionInfoModal implements Modal<void> {
-
-    private eventTarget = new EventTarget()
-
-    private root = document.createElement("div")
-
-    private textTy: LogMessageType | null = null
-    private text = document.createElement("p")
-
-    private options = document.createElement("div")
-    private debugDetailButton = document.createElement("button")
-    private closeButton = document.createElement("button")
-
-    private debugDetail = "" // We store this seperate because line breaks don't work when the element is not mounted on the dom
-    private debugDetailDisplay = document.createElement("div")
-
-    constructor() {
-        this.root.classList.add("modal-video-connect")
-
-        this.text.innerText = I.stream.connecting
-        this.root.appendChild(this.text)
-
-        this.root.appendChild(this.options)
-        this.options.classList.add("modal-video-connect-options")
-
-        this.debugDetailButton.innerText = I.stream.showLogs
-        this.debugDetailButton.addEventListener("click", this.onDebugDetailClick.bind(this))
-        this.options.appendChild(this.debugDetailButton)
-
-        this.closeButton.innerText = I.stream.close
-        this.closeButton.addEventListener("click", this.onClose.bind(this))
-        this.options.appendChild(this.closeButton)
-
-        this.debugDetailDisplay.classList.add("textlike")
-        this.debugDetailDisplay.classList.add("modal-video-connect-debug")
-    }
-
-    private onDebugDetailClick() {
-        let debugDetailCurrentlyShown = this.root.contains(this.debugDetailDisplay)
-
-        if (debugDetailCurrentlyShown) {
-            this.debugDetailButton.innerText = I.stream.showLogs
-            this.root.removeChild(this.debugDetailDisplay)
-        } else {
-            this.debugDetailButton.innerText = I.stream.hideLogs
-            this.root.appendChild(this.debugDetailDisplay)
-            this.debugDetailDisplay.innerText = this.debugDetail
-        }
-    }
-
-    private debugLog(line: string) {
-        this.debugDetail += `${line}\n`
-        this.debugDetailDisplay.innerText = this.debugDetail
-        console.info(`[Stream]: ${line}`)
-    }
-
-    onInfo(event: InfoEvent) {
-        const data = event.detail
-
-        if (data.type == "connectionComplete") {
-            const text = I.stream.connectionComplete
-            this.text.innerText = text
-            this.debugLog(text)
-
-            showModal(null)
-        } else if (data.type == "addDebugLine") {
-            const message = data.line.trim()
-            if (message) {
-                this.debugLog(message)
-
-                if (!this.textTy) {
-                    this.text.innerText = message
-                    this.textTy = data.additional?.type ?? null
-                } else if (data.additional?.type == "fatalDescription" || data.additional?.type == "ifErrorDescription") {
-                    if (this.text.innerText) {
-                        this.text.innerText += "\n" + message
-                    } else {
-                        this.text.innerText = message
-                    }
-                    this.textTy = data.additional.type
-                }
-            }
-
-            if (data.additional?.type == "fatal" || data.additional?.type == "fatalDescription") {
-                showModal(this)
-            } else if (data.additional?.type == "informError") {
-                showNotification(data.line)
-            }
-        }
-    }
-
-    onClose() {
-        showModal(null)
-    }
-
-    onFinish(abort: AbortSignal): Promise<void> {
-        return new Promise((resolve, reject) => {
-            this.eventTarget.addEventListener("ml-connected", () => resolve(), { once: true, signal: abort })
-        })
-    }
-
-    mount(parent: HTMLElement): void {
-        parent.appendChild(this.root)
-    }
-    unmount(parent: HTMLElement): void {
-        parent.removeChild(this.root)
     }
 }
 
