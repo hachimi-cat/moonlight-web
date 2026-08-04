@@ -84,6 +84,13 @@ export default {
                     from: "./web/manifest.json",
                     to: "manifest.json"
                 },
+                {
+                    // All three HTML pages link this favicon by relative
+                    // path; it must exist at a stable name, not a hashed
+                    // asset module.
+                    from: "./web/resources/moonlight.svg",
+                    to: "resources/moonlight.svg"
+                },
             ],
         }),
     ],

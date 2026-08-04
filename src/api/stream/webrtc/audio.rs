@@ -67,7 +67,9 @@ impl AudioChannel {
                 let mut sequence_number = 0u16;
 
                 while let Some(frame) = frame_receiver.recv().await {
-                    let timestamp = (frame.timestamp.as_millis() * 48) as u32;
+                    // 48kHz clock; micros keep 5ms Opus frames from being
+                    // quantized to whole milliseconds (see video.rs).
+                    let timestamp = (frame.timestamp.as_micros() * 48 / 1000) as u32;
 
                     if track.all_binding_paused().await {
                         trace!("audio track all binding paused");
