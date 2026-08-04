@@ -1,4 +1,14 @@
 :root {
+    /** Collapsed-sidebar peek: 30px toggle + 5px flex gap. The old
+        hardcoded 40px disagreed with the button's real footprint (global
+        `button { margin: 8px }`), clipping the arrow. */
+    --ml-sidebar-peek: 35px;
+    /** Skin tokens for the connect card — embedders override these custom
+        properties, never the rules. */
+    --pw-card-border: rgba(148, 163, 184, 0.18);
+    --pw-card-muted: #9ca3af;
+    --pw-card-accent: #a1a1aa;
+    --pw-card-log-bg: rgba(0, 0, 0, 0.35);
     /* Colors - Dark Theme */
     --bg-0: #000f1f;
     --bg-1: #001a2e;
@@ -508,7 +518,7 @@ input[type=number] {
 
 .sidebar-edge-left .sidebar-background {
     flex-direction: row-reverse;
-    transform: translate(calc(-100% + 40px), -50%);
+    transform: translate(calc(-100% + var(--ml-sidebar-peek)), -50%);
 }
 
 .sidebar-overlay.sidebar-edge-right {
@@ -518,7 +528,7 @@ input[type=number] {
 
 .sidebar-edge-right .sidebar-background {
     flex-direction: row;
-    transform: translate(calc(100% - 40px), -50%);
+    transform: translate(calc(100% - var(--ml-sidebar-peek)), -50%);
 }
 
 .sidebar-edge-left.sidebar-show .sidebar-background,
@@ -533,7 +543,7 @@ input[type=number] {
 
 .sidebar-edge-up .sidebar-background {
     flex-direction: column-reverse;
-    transform: translate(-50%, calc(-100% + 40px));
+    transform: translate(-50%, calc(-100% + var(--ml-sidebar-peek)));
 }
 
 .sidebar-overlay.sidebar-edge-down {
@@ -543,7 +553,7 @@ input[type=number] {
 
 .sidebar-edge-down .sidebar-background {
     flex-direction: column;
-    transform: translate(-50%, calc(100% - 40px));
+    transform: translate(-50%, calc(100% - var(--ml-sidebar-peek)));
 }
 
 .sidebar-edge-down.sidebar-show .sidebar-background,
@@ -552,7 +562,10 @@ input[type=number] {
 }
 
 .sidebar-button {
-    /** Note: Button full size: 30px(width / height) + 5px(padding as in button selector) + 5px(.sidebar-background gap) = 40px */
+    /** Outer footprint must stay 30px + the 5px flex gap = --ml-sidebar-peek.
+        margin: 0 is load-bearing — the global button margin pushed the
+        toggle past the peek window and clipped the arrow. */
+    margin: 0;
     width: 30px;
     height: 30px;
     display: flex;
@@ -565,6 +578,8 @@ input[type=number] {
     width: 100%;
     height: 100%;
     background-position: center;
+    background-repeat: no-repeat;
+    background-size: 24px 24px;
     background-image: url("../resources/arrow_left.svg");
 
     transition: all 0.3s linear;
@@ -1393,4 +1408,107 @@ canvas.video-stream {
 .user-info-delete,
 .role-info-delete {
     background-color: red;
+}
+
+/** Connect card (pw) — shadcn-structured connect/status modal.
+    Geometry only on the shell: an embedder skin (pawpado stream-skin)
+    owns the palette via `body.stream .modal-content`, and the custom
+    properties below let it recolor the card internals without touching
+    a single rule here. */
+.modal-content:has(.modal-video-connect) {
+    width: min(460px, 92vw);
+    margin: 18vh auto;
+    padding: 20px 22px;
+}
+
+.modal-video-connect {
+    gap: 14px;
+}
+
+.modal-video-connect .pw-connect-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.modal-video-connect .pw-connect-title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+
+.modal-video-connect .pw-connect-spinner {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    border-radius: 9999px;
+    border: 2px solid var(--pw-card-border);
+    border-top-color: var(--pw-card-accent);
+    animation: pw-connect-spin 0.8s linear infinite;
+}
+
+.pw-connect-failed .pw-connect-spinner {
+    display: none;
+}
+
+@keyframes pw-connect-spin {
+    to { transform: rotate(360deg); }
+}
+
+.modal-video-connect .pw-connect-text {
+    margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--pw-card-muted);
+    white-space: pre-wrap;
+}
+
+.modal-video-connect .pw-connect-text:empty {
+    display: none;
+}
+
+.modal-video-connect .pw-connect-log {
+    margin: 0;
+    width: 100%;
+    box-sizing: border-box;
+    max-height: 32vh;
+    overflow: auto;
+    padding: 10px 12px;
+    border: 1px solid var(--pw-card-border);
+    border-radius: 10px;
+    background: var(--pw-card-log-bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: var(--pw-card-muted);
+}
+
+.modal-video-connect .pw-connect-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    width: 100%;
+    margin-top: 2px;
+}
+
+/** Two-class depth on purpose: outranks both the global `button` rule and
+    an embedder's `body.stream button` recolor, so these two stay quiet
+    outline buttons no matter which sheet loads last. */
+.modal-video-connect .pw-connect-actions button {
+    margin: 0;
+    box-shadow: none;
+    text-shadow: none;
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--pw-card-border);
+    background: transparent;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: inherit;
+    cursor: pointer;
+}
+
+.modal-video-connect .pw-connect-actions button:hover {
+    background: rgba(255, 255, 255, 0.06);
 }
