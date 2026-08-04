@@ -84,6 +84,27 @@ export const SUPPORTED_BUTTONS: ControllerButtons = {
 }
 
 
+// Nintendo pads report the standard mapping by POSITION, but their labels
+// sit swapped relative to Xbox: the button labeled A is where Xbox puts B,
+// X where Xbox puts Y. A game showing "Press A" then reads the wrong
+// button on every prompt. Vendor 057e is Nintendo's USB id; the name
+// checks catch pads (and browsers) that don't expose the vendor id.
+const NINTENDO_LAYOUT_ID = /vendor:\s*057e|nintendo|joy-?con|pro controller/i
+
+export function isNintendoLayout(gamepad: Gamepad): boolean {
+    return NINTENDO_LAYOUT_ID.test(gamepad.id)
+}
+
+// The invert toggles are applied relative to the pad's detected layout —
+// an XOR, not an override. OFF therefore means "buttons do what their
+// labels say" on every pad, which is the default players expect, and a
+// Nintendo player who prefers positional (Xbox-style) mapping still has
+// the toggle as an escape hatch.
+export function effectiveControllerConfig(gamepad: Gamepad, config: ControllerConfig): ControllerConfig {
+    if (!isNintendoLayout(gamepad)) return config
+    return { ...config, invertAB: !config.invertAB, invertXY: !config.invertXY }
+}
+
 function convertStandardButton(buttonIndex: number, config?: ControllerConfig): keyof ControllerButtons | null {
     let button = STANDARD_BUTTONS[buttonIndex] ?? null
 
@@ -117,11 +138,12 @@ export type GamepadState = {
 
 export function extractGamepadState(gamepad: Gamepad, config: ControllerConfig): GamepadState {
     const state = emptyGamepadState()
+    const effective = effectiveControllerConfig(gamepad, config)
 
     for (let buttonId = 0; buttonId < gamepad.buttons.length; buttonId++) {
         const button = gamepad.buttons[buttonId]
 
-        const buttonName = convertStandardButton(buttonId, config)
+        const buttonName = convertStandardButton(buttonId, effective)
         if (button.pressed && buttonName !== null) {
             state.buttonFlags[buttonName] = true
         }

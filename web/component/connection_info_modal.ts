@@ -94,8 +94,12 @@ export class ConnectionInfoModal implements Modal<void> {
                 this.debugLog(message)
 
                 if (!this.textTy) {
-                    this.text.innerText = message
-                    this.textTy = data.additional?.type ?? null
+                    // Raw ICE-candidate dumps are diagnostics, not status —
+                    // they stay in the log, never as the card's stage text.
+                    if (!/ice candidate|candidate:/i.test(message)) {
+                        this.text.innerText = message
+                        this.textTy = data.additional?.type ?? null
+                    }
                 } else if (data.additional?.type == "fatalDescription" || data.additional?.type == "ifErrorDescription") {
                     if (this.text.innerText) {
                         this.text.innerText += "\n" + message
