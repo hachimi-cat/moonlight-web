@@ -172,18 +172,6 @@ impl ControlChannel {
             && !self.on_receive.is_closed()
     }
 
-    /// Is anything still queued that has not reached the data channel yet?
-    ///
-    /// [`Self::send`] only enqueues; the write happens inside [`Self::drive`].
-    /// A caller that is about to stop driving this channel needs to know
-    /// whether stopping now would discard packets — see the flush in
-    /// `webrtc_loop`.
-    pub fn has_pending_sends(&self) -> bool {
-        match &self.protocol {
-            Protocol::Simple { send_queue, .. } => !send_queue.is_empty(),
-            Protocol::Enet { send_queue, .. } => !send_queue.is_empty(),
-        }
-    }
 
     /// # Cancel Safety
     /// This function is cancel safe.

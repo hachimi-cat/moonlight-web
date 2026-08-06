@@ -23,7 +23,7 @@ use crate::{
 /// How long to keep writing queued control packets after the moonlight
 /// stream dies. Small: the queue holds a handful of packets and the peer is
 /// on its way out either way.
-const CONTROL_FLUSH_TIMEOUT: Duration = Duration::from_millis(750);
+const CONTROL_FLUSH_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Write out whatever the host sent us on its way down before tearing the
 /// peer connection apart.
@@ -38,20 +38,24 @@ const CONTROL_FLUSH_TIMEOUT: Duration = Duration::from_millis(750);
 /// deliberate quit from a dropped connection and showed "connection lost"
 /// for every clean exit.
 async fn flush_control_channel(control_channel: &mut ControlChannel) {
-    if !control_channel.has_pending_sends() {
-        return;
-    }
-    let flushed = timeout(CONTROL_FLUSH_TIMEOUT, async {
-        while control_channel.has_pending_sends() {
+    // Deliberately NOT gated on "is anything queued?". Under the enet
+    // protocol — which is what a normal stream negotiates — `send` hands the
+    // packet to the ENET HOST, and its output only reaches the channel's
+    // send_queue when `drive` pumps `host.pending_send()`. So the queue reads
+    // EMPTY at the exact moment we want to flush, and an early return on it
+    // skipped the flush entirely. That is why pawpado.5 did not fix this.
+    //
+    // Driving under a timeout is both simpler and protocol-agnostic: it pumps
+    // the enet host, writes the queue out to the data channel, and then just
+    // idles (drive parks on `pending()` with nothing to do) until the deadline.
+    let _ = timeout(CONTROL_FLUSH_TIMEOUT, async {
+        loop {
             if control_channel.drive().await.is_err() {
                 return;
             }
         }
     })
     .await;
-    if flushed.is_err() {
-        warn!("timed out flushing control packets before teardown");
-    }
 }
 
 pub async fn webrtc_loop(
