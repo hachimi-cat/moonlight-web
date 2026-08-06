@@ -1,7 +1,7 @@
 import { Api, apiWebRTCConfiguration, apiWebRTCOffer } from "../api"
 import { Component } from "../component/index"
 import { Settings, TransportType } from "../component/settings_menu"
-import { ControlPacket, ControlPacket_Tags, VideoFormats } from "../uniffi/moonlight_common_bindings"
+import { ControlPacket, ControlPacket_Tags, TerminationReason, TerminationReason_Tags, VideoFormats } from "../uniffi/moonlight_common_bindings"
 import { wait } from "../util"
 import { AudioPlayer, AudioPlayerSetup } from "./audio/index"
 import { buildAudioPipeline } from "./audio/pipeline"
@@ -39,6 +39,26 @@ export type InfoEvent = CustomEvent<
     { type: "streamEnded", graceful: boolean }
 >
 export type InfoEventListener = (event: InfoEvent) => void
+
+/**
+ * Did the host end the stream on purpose?
+ *
+ * The wire value is NVST_DISCONN_SERVER_TERMINATED_CLOSED (0x80030023),
+ * which moonlight-common-c treats as ML_ERROR_GRACEFUL_TERMINATION — a
+ * user-initiated quit. Everything else is an error code describing how the
+ * stream broke. GFE's short form reports the same intent as 0.
+ */
+export function isGracefulTermination(reason: TerminationReason): boolean {
+    const code = reason.inner[0]
+
+    if (reason.tag == TerminationReason_Tags.Long) {
+        return code == GRACEFUL_TERMINATION_CODE
+    }
+    return code == 0
+}
+
+/** NVST_DISCONN_SERVER_TERMINATED_CLOSED */
+const GRACEFUL_TERMINATION_CODE = 0x80030023
 
 export function getStreamerSize(settings: Settings, viewerScreenSize: [number, number]): [number, number] {
     let width, height
@@ -190,9 +210,19 @@ export class Stream implements Component {
         // not the "could not connect" story the fatal modal below tells.
         // Before this branch a host quitting the game surfaced as "Tried all
         // configured transport options but no connection was possible".
+        //
+        // Gracefulness comes from the host's ServerTermination packet, NOT
+        // from `shutdown`: no transport has ever produced "disconnect" (both
+        // emit only "failed"/"failednoconnect"), so testing for it made
+        // `graceful` permanently false and the auto-close branch downstream
+        // unreachable — the tab never closed and every clean quit was
+        // reported to the player as a lost connection.
         if (shutdown == "disconnect" || shutdown == "failed") {
             const event: InfoEvent = new CustomEvent("stream-info", {
-                detail: { type: "streamEnded", graceful: shutdown == "disconnect" }
+                detail: {
+                    type: "streamEnded",
+                    graceful: shutdown == "disconnect" || this.serverTerminationGraceful,
+                }
             })
             this.eventTarget.dispatchEvent(event)
             return
@@ -608,9 +638,23 @@ export class Stream implements Component {
             case ControlPacket_Tags.ControllerRumbleTriggers:
                 // TODO
                 break
+            case ControlPacket_Tags.ServerTermination:
+                // The ONLY signal that says the host ended the stream on
+                // purpose (the player quit the game) rather than the
+                // connection dying. The transports cannot know this — a
+                // peer connection reaching "closed" looks identical either
+                // way — so it is recorded here and read once the transport
+                // actually closes. Relayed to us by the server's webrtc
+                // loop, which forwards every host control packet.
+                this.serverTerminationGraceful = isGracefulTermination(packet.inner.reason)
+                this.debugLog(`server terminated the stream (graceful: ${this.serverTerminationGraceful})`)
+                break
         }
         // TODO
     }
+
+    /** Set when the host said it was ending the stream deliberately. */
+    private serverTerminationGraceful = false
 
     // -- Class Api
     addInfoListener(listener: InfoEventListener) {

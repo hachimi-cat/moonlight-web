@@ -32,17 +32,42 @@ export function gamepadLaunchSettings(
         return { attachedMask: 1, persistAfterDisconnect: true }
     }
 
-    const count = Math.max(0, Math.min(16, Math.floor(connectedGamepads)))
+    // At LEAST one slot, even when the browser has not revealed a pad yet.
+    //
+    // The Gamepad API hides a controller until the player presses a button
+    // on it, so a pad that is plugged in and idle at launch counts as zero
+    // here. That produced attachedMask 0 — a session Apollo starts with no
+    // virtual controller at all — and while a later `sendControllerAdd`
+    // does hot-plug one in, games that enumerate controllers once at
+    // startup (Hollow Knight and most other Unity legacy-input titles)
+    // never look again and stay keyboard-only for the whole session.
+    //
+    // Reserving slot 1 up front costs a player nothing: it is the same
+    // single idle virtual pad Single mode has always attached, and the
+    // extra slots for real multiplayer are still added as their pads
+    // appear. persistAfterDisconnect keeps that slot alive across a pad
+    // going idle, for the same scan-once reason.
+    const count = Math.max(1, Math.min(16, Math.floor(connectedGamepads)))
     const attachedMask = count == 16 ? 0xffff : (1 << count) - 1
-    return { attachedMask, persistAfterDisconnect: false }
+    return { attachedMask, persistAfterDisconnect: true }
 }
 
 // https://w3c.github.io/gamepad/#remapping
+//
+// The standard mapping is POSITIONAL: index 0 is the bottom button of the
+// right cluster, 1 the right, 2 the left, 3 the top. The names below are
+// the flags sent to the host, and those are XInput's — where A is the
+// BOTTOM button (A_FLAG 0x1000 -> XUSB_GAMEPAD_A).
+//
+// These four were previously in Nintendo label order (0 -> "b", 1 -> "a"),
+// which swapped A/B and X/Y for every standard pad whenever the invert
+// toggles were at their defaults. An Xbox pad on a fresh profile therefore
+// sent B when the player pressed A.
 const STANDARD_BUTTONS: Array<keyof ControllerButtons | null> = [
-    "b",
     "a",
-    "y",
+    "b",
     "x",
+    "y",
     "lb",
     "rb",
     // These are triggers

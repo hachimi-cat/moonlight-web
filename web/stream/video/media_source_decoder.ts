@@ -227,6 +227,14 @@ export class MediaSourceDecoder implements DataVideoRenderer {
                 return
             }
 
+            // appendBuffer throws InvalidStateError once the MediaSource has
+            // left "open" — which is exactly what teardown does while frames
+            // are still queued, so the end of every stream threw out of the
+            // updateend handler.
+            if (this.mediaSource.readyState != "open") {
+                return
+            }
+
             const [unit] = this.buffers.splice(0, 1)
 
             this.sourceBuffer.appendBuffer(unit)
