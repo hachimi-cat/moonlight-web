@@ -6,7 +6,8 @@ use moonlight_common::stream::{
     },
     tokio::{MoonlightStream, MoonlightStreamEvent},
 };
-use tokio::select;
+use std::time::Duration;
+use tokio::{select, time::timeout};
 use tracing::{debug, info, warn};
 use webrtc::peer_connection::{RTCPeerConnection, peer_connection_state::RTCPeerConnectionState};
 
@@ -18,6 +19,40 @@ use crate::{
     },
     app::AppError,
 };
+
+/// How long to keep writing queued control packets after the moonlight
+/// stream dies. Small: the queue holds a handful of packets and the peer is
+/// on its way out either way.
+const CONTROL_FLUSH_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// Write out whatever the host sent us on its way down before tearing the
+/// peer connection apart.
+///
+/// [`ControlChannel::send`] only ENQUEUES — the write happens inside its
+/// `drive()`, which only runs from the `select!` in [`webrtc_loop`]. When a
+/// player quits a game the host sends ServerTermination and the moonlight
+/// peer disconnects in the same breath (`disconnect_now`, see
+/// moonlight-common-rust's control stream), so `is_alive()` goes false on
+/// the very next iteration and the loop broke with that packet still in the
+/// queue. It never reached the browser, which therefore could not tell a
+/// deliberate quit from a dropped connection and showed "connection lost"
+/// for every clean exit.
+async fn flush_control_channel(control_channel: &mut ControlChannel) {
+    if !control_channel.has_pending_sends() {
+        return;
+    }
+    let flushed = timeout(CONTROL_FLUSH_TIMEOUT, async {
+        while control_channel.has_pending_sends() {
+            if control_channel.drive().await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+    if flushed.is_err() {
+        warn!("timed out flushing control packets before teardown");
+    }
+}
 
 pub async fn webrtc_loop(
     mut stream: MoonlightStream,
@@ -33,6 +68,7 @@ pub async fn webrtc_loop(
     loop {
         if !stream.is_alive() {
             info!("stopping stream because the moonlight stream is dead");
+            flush_control_channel(&mut control_channel).await;
             break;
         }
 

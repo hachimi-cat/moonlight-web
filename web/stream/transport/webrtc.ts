@@ -520,7 +520,8 @@ class WebRtcControlStream implements IControlStream {
         if (this.streamType == "simple") {
             const data = controlPacketSerialize(this.config, packet)
             console.debug(data, "sending control data")
-            if (data) {
+            // Same closed-channel guard as controlStreamPollOutput.
+            if (data && this.channel.readyState == "open") {
                 this.channel.send(data)
             }
         } else if (this.streamType == "enet") {
@@ -557,6 +558,15 @@ class WebRtcControlStream implements IControlStream {
 
         if (handleInput) {
             this.controlStream.handleTimeout(uniffiNow())
+        }
+
+        // This runs off a timer, so it keeps firing after the peer is gone.
+        // send() on a non-open RTCDataChannel throws InvalidStateError, and
+        // because nothing here catches it, that throw escaped as an uncaught
+        // error at the end of every stream — the "object is in an invalid
+        // state" players were seeing when they quit a game.
+        if (this.channel.readyState != "open") {
+            return
         }
 
         let send: UdpTransmit | undefined
