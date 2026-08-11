@@ -172,7 +172,6 @@ impl ControlChannel {
             && !self.on_receive.is_closed()
     }
 
-
     /// # Cancel Safety
     /// This function is cancel safe.
     /// If it is cancelled no state is lost.
