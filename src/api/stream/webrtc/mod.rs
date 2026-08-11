@@ -688,3 +688,30 @@ pub async fn webrtc_delete(
         .finish()
         .set_body(BoxBody::new("stream not found")))
 }
+
+/// Stop every stream the authenticated caller is allowed to control.
+///
+/// Stream IDs are intentionally opaque and may become random while a recently
+/// closed stream is still retained. A host-side lifecycle hook therefore
+/// cannot safely discover the current stream by probing numeric IDs.
+#[delete("")]
+#[instrument(skip(app, user), fields(user = %user.id()))]
+pub async fn webrtc_delete_all(
+    app: Data<App>,
+    mut user: AuthenticatedUser,
+) -> Result<HttpResponse, AppError> {
+    let streams = app.streams().await;
+    let mut stopped = 0;
+
+    for stream in streams {
+        if stream
+            .send_event(&mut user, ExternalStreamEvent::Stop)
+            .await
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+
+    Ok(HttpResponse::Ok().body(stopped.to_string()))
+}

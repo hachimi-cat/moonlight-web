@@ -241,6 +241,11 @@ impl App {
         Ok(stream.clone())
     }
 
+    /// Take a snapshot so callers can signal streams without holding the map lock.
+    pub async fn streams(&self) -> Vec<Stream> {
+        self.inner.streams.read().await.values().cloned().collect()
+    }
+
     // -- Users
 
     /// Handles all logic related to adding the first user:
