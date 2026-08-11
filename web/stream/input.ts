@@ -120,12 +120,27 @@ export class StreamInput {
             )
             this.sendControllerAdd(0, SUPPORTED_BUTTONS, capabilities)
         } else {
+            let advertisedController = false
             for (let id = 0; id < this.gamepads.length; id++) {
                 if (this.gamepads[id] != null) {
                     this.sendControllerAdd(id, SUPPORTED_BUTTONS, this.controllerCapabilities(
                         navigator.getGamepads()[this.gamepads[id]!.gamepadIndex]
                     ))
+                    advertisedController = true
                 }
+            }
+
+            // Apollo 0.4.6 does not create a ViGEm pad from the controller
+            // mask in /launch. It only does so after ControllerConnect reaches
+            // the live control channel, which is normally delayed until the
+            // browser exposes a physical pad after its first button press.
+            // Advertise the launch-reserved slot immediately so a host-side
+            // launcher can see XInput before it starts scan-once games.
+            if (!advertisedController) {
+                this.sendControllerAdd(0, SUPPORTED_BUTTONS, this.emptyControllerCapabilities())
+                this.placeholderControllerAdvertised = true
+            } else {
+                this.placeholderControllerAdvertised = false
             }
         }
         this.registerBufferedControllers()
@@ -917,6 +932,7 @@ export class StreamInput {
     private gamepads: Array<{ gamepadIndex: number, oldState: GamepadState } | null> = []
     private singleControllerState: GamepadState = emptyGamepadState()
     private gamepadRumbleInterval: number | null = null
+    private placeholderControllerAdvertised = false
 
     onGamepadConnect(gamepad: Gamepad) {
         if (!this.connected) {
@@ -953,7 +969,14 @@ export class StreamInput {
         const capabilities = this.controllerCapabilities(gamepad)
 
         if (this.config.controllerConfig.multiControllerMode == "auto") {
-            this.sendControllerAdd(id, SUPPORTED_BUTTONS, capabilities)
+            if (id == 0 && this.placeholderControllerAdvertised) {
+                // Slot 0 already exists on the host. Adopt it instead of
+                // sending a duplicate arrival when the browser finally
+                // reveals the real physical controller.
+                this.placeholderControllerAdvertised = false
+            } else {
+                this.sendControllerAdd(id, SUPPORTED_BUTTONS, capabilities)
+            }
         }
 
         if (gamepad.mapping != "standard") {

@@ -32,15 +32,16 @@ export function gamepadLaunchSettings(
         return { attachedMask: 1, persistAfterDisconnect: true }
     }
 
-    // At LEAST one slot, even when the browser has not revealed a pad yet.
+    // Reserve at LEAST one slot, even when the browser has not revealed a
+    // pad yet.
     //
     // The Gamepad API hides a controller until the player presses a button
     // on it, so a pad that is plugged in and idle at launch counts as zero
-    // here. That produced attachedMask 0 — a session Apollo starts with no
-    // virtual controller at all — and while a later `sendControllerAdd`
-    // does hot-plug one in, games that enumerate controllers once at
-    // startup (Hollow Knight and most other Unity legacy-input titles)
-    // never look again and stay keyboard-only for the whole session.
+    // here. That produced attachedMask 0, so the launch could not reserve a
+    // controller number. Apollo 0.4.6 still creates the actual ViGEm device
+    // only when `ControllerConnect` reaches the live control channel; see
+    // StreamInput's launch placeholder and the host-side wait launcher for
+    // scan-once games such as Hollow Knight.
     //
     // Reserving slot 1 up front costs a player nothing: it is the same
     // single idle virtual pad Single mode has always attached, and the
