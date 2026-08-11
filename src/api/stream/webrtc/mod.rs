@@ -56,9 +56,9 @@ use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability, RTPCodecType,
 };
 
-use crate::api::stream::apply_role_restrictions;
 use crate::api::stream::webrtc::convert::{into_webrtc_ice_candidate, into_webrtc_network_type};
 use crate::api::stream::webrtc::ice_servers::generate_ice_servers;
+use crate::api::stream::{apply_role_restrictions, stop_conflicting_app};
 use crate::app::App;
 use crate::app::host::HostId;
 use crate::app::stream::{ExternalStreamEvent, Stream, StreamId};
@@ -252,6 +252,7 @@ pub async fn webrtc_post(
 
     // Get app
     let app_id = AppId(session.app_id);
+    stop_conflicting_app(&host, app_id).await?;
 
     // Create offer based on the sdp
     let offer = RTCSessionDescription::offer(session_description)?;

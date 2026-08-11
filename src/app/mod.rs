@@ -65,6 +65,8 @@ pub enum AppError {
     WebRtcClientCodecNotSupported,
     #[error("the stream was already closed")]
     StreamClosed,
+    #[error("the host did not stop its current app before launching the requested app")]
+    HostAppSwitchTimeout,
     // -- Unauthorized
     #[error("the credentials don't exists")]
     CredentialsWrong,
@@ -137,6 +139,8 @@ impl ResponseError for AppError {
             Self::StreamClosed => {
                 HttpResponse::new(StatusCode::NOT_FOUND).set_body(BoxBody::new("stream not found"))
             }
+            Self::HostAppSwitchTimeout => HttpResponse::new(StatusCode::CONFLICT)
+                .set_body(BoxBody::new("the current host app did not stop in time")),
             Self::UserAlreadyExists => HttpResponse::new(StatusCode::CONFLICT),
             Self::CredentialsWrong => HttpResponse::new(StatusCode::UNAUTHORIZED),
             Self::SessionTokenNotFound => HttpResponse::new(StatusCode::UNAUTHORIZED),

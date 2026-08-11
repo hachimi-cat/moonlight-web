@@ -5,7 +5,7 @@ use crate::api::{
         StreamStatsClientboundMessage, StreamStatsServerboundMessage, WebSocketChannel,
         WebSocketClientboundMessage, WebSocketServerboundMessage, WebSocketStreamResponse,
     },
-    stream::apply_role_restrictions,
+    stream::{apply_role_restrictions, stop_conflicting_app},
 };
 use actix_web::{Error, HttpRequest, HttpResponse, get, rt::spawn, web::Payload};
 use actix_ws::{Message, MessageStream, Session};
@@ -140,6 +140,7 @@ async fn handle_ws(
 
     // -- Get Apps
     let app_id = AppId(stream_request.app_id);
+    stop_conflicting_app(&host, app_id).await?;
     let apps = host.app_list().await?;
     let app_title = apps
         .into_iter()
