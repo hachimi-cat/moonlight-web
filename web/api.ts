@@ -392,8 +392,8 @@ export async function apiDeleteRole(api: Api, query: DeleteRoleQuery): Promise<v
 export async function apiGetHosts(api: Api): Promise<StreamedJsonResponse<GetHostsResponse, UndetailedHost>> {
     return await fetchApi<GetHostsResponse, UndetailedHost>(api, "/hosts", GET, { response: "jsonStreaming" })
 }
-export async function apiGetHost(api: Api, query: GetHostQuery): Promise<DetailedHost> {
-    const response = await fetchApi(api, "/host", GET, { query })
+export async function apiGetHost(api: Api, query: GetHostQuery, timeout?: number): Promise<DetailedHost> {
+    const response = await fetchApi(api, "/host", GET, { query }, timeout)
 
     return (response as GetHostResponse).host
 }
@@ -493,10 +493,20 @@ export type WebRTCAnswer = {
     location: string | null,
 }
 
-export async function apiWebRTCOffer(api: Api, offerSdp: string): Promise<WebRTCAnswer> {
+export async function apiWebRTCOffer(
+    api: Api,
+    offerSdp: string,
+    gamepads: { attached: number, persistAfterDisconnect: boolean },
+): Promise<WebRTCAnswer> {
     const ENDPOINT = "/host/stream/webrtc"
 
-    const [url, request] = buildRequest(api, ENDPOINT, POST, { sdp: offerSdp })
+    const [url, request] = buildRequest(api, ENDPOINT, POST, {
+        sdp: offerSdp,
+        query: {
+            gamepads_attached: gamepads.attached,
+            gamepads_persist_after_disconnect: gamepads.persistAfterDisconnect,
+        },
+    })
 
     let response
     try {

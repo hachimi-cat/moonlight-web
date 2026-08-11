@@ -121,8 +121,12 @@ impl VideoChannel {
                 while let Some(frame) = frame_receiver.recv().await {
                     let frame = frame.as_ref();
 
-                    let timestamp =
-                        (frame.metadata.timestamp.as_millis() * clock_rate as u128 / 1000) as u32;
+                    // Micros, not millis: at a 90kHz clock a millisecond is
+                    // 90 ticks, so ms truncation quantizes every frame's
+                    // timestamp and shows up as synthetic jitter at the
+                    // receiver.
+                    let timestamp = (frame.metadata.timestamp.as_micros() * clock_rate as u128
+                        / 1_000_000) as u32;
 
                     if track.all_binding_paused().await {
                         trace!("video track all binding paused");

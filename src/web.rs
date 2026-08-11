@@ -32,7 +32,20 @@ async fn config_js(app: Data<App>) -> HttpResponse {
             return HttpResponse::InternalServerError().finish();
         }
     };
-    let config_js = format!("export default {config_json}");
+    // Emitted as a CLASSIC script that assigns a global, not an ES module.
+    //
+    // The web client used to ship as raw ES modules, so `import CONFIG from
+    // "./config.js"` in config_.ts was a real HTTP request that landed on
+    // this route. Since the webpack build, that import is rewritten to the
+    // `window.__RUNTIME_CONFIG__` external — and nothing was assigning it, so
+    // `path_prefix` silently resolved to "" and every URL the client built
+    // pointed at the origin root. That breaks any deployment served under a
+    // prefix (pawpado proxies each instance under /stream/i/<id>).
+    //
+    // `export default` would be a syntax error in a classic script, so the
+    // global assignment IS the interface now; the templates load this before
+    // the bundle.
+    let config_js = format!("window.__RUNTIME_CONFIG__ = {config_json};");
 
     HttpResponse::Ok()
         .append_header(("Content-Type", "text/javascript"))

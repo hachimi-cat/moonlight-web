@@ -5,7 +5,7 @@ use crate::api::{
         StreamStatsClientboundMessage, StreamStatsServerboundMessage, WebSocketChannel,
         WebSocketClientboundMessage, WebSocketServerboundMessage, WebSocketStreamResponse,
     },
-    stream::apply_role_restrictions,
+    stream::{apply_role_restrictions, stop_conflicting_app},
 };
 use actix_web::{Error, HttpRequest, HttpResponse, get, rt::spawn, web::Payload};
 use actix_ws::{Message, MessageStream, Session};
@@ -87,7 +87,7 @@ async fn handle_ws(
     mut ws_sender: Session,
     mut ws_receiver: MessageStream,
 ) -> Result<(), AppError> {
-    let control_config = create_control_packet_config();
+    let control_config = create_control_packet_config(true);
 
     // See if the user is allowed to use web sockets
     let permissions = user.role().await?.permissions().await?;
@@ -140,6 +140,7 @@ async fn handle_ws(
 
     // -- Get Apps
     let app_id = AppId(stream_request.app_id);
+    stop_conflicting_app(&host, app_id).await?;
     let apps = host.app_list().await?;
     let app_title = apps
         .into_iter()
@@ -165,8 +166,8 @@ async fn handle_ws(
         color_range: ColorRange::Limited,
         local_audio_play_mode: stream_request.local_audio_play_mode,
         audio_config: AudioConfig::STEREO,
-        gamepads_attached: ActiveGamepads::empty(),
-        gamepads_persist_after_disconnect: false,
+        gamepads_attached: ActiveGamepads::from_bits_retain(stream_request.gamepads_attached),
+        gamepads_persist_after_disconnect: stream_request.gamepads_persist_after_disconnect,
         // TODO: mic?
         enable_mic: false,
     };

@@ -1,6 +1,6 @@
 import { ClientInputEvent, ControllerButtons, ControllerCapabilities, ControllerType, KeyAction, KeyModifiers, MouseButton, MouseButtonAction, TouchEventType } from "../uniffi/moonlight_common_bindings"
 import { U16_MAX } from "./buffer"
-import { ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad"
+import { areGamepadStatesEqual, ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, mergeGamepadStates, SUPPORTED_BUTTONS } from "./gamepad"
 import { StreamCapabilities } from "./index"
 import { convertToKey, convertToModifiers, emptyKeyModifiers } from "./keyboard"
 import { convertToButton } from "./mouse"
@@ -44,6 +44,7 @@ export function defaultStreamInputConfig(): StreamInputConfig {
         controllerConfig: {
             invertAB: false,
             invertXY: false,
+            multiControllerMode: "auto",
             sendIntervalOverride: null
         }
     }
@@ -109,6 +110,39 @@ export class StreamInput {
         this.streamSize = desktopSize
 
         this.capabilities = capabilities
+
+        // A fallback/reconnect gives us a fresh control stream while the
+        // physical-pad list survives. Re-advertise those local controllers.
+        if (this.config.controllerConfig.multiControllerMode == "single") {
+            const capabilities = navigator.getGamepads().reduce(
+                (merged, gamepad) => this.mergeControllerCapabilities(merged, this.controllerCapabilities(gamepad)),
+                this.emptyControllerCapabilities(),
+            )
+            this.sendControllerAdd(0, SUPPORTED_BUTTONS, capabilities)
+        } else {
+            let advertisedController = false
+            for (let id = 0; id < this.gamepads.length; id++) {
+                if (this.gamepads[id] != null) {
+                    this.sendControllerAdd(id, SUPPORTED_BUTTONS, this.controllerCapabilities(
+                        navigator.getGamepads()[this.gamepads[id]!.gamepadIndex]
+                    ))
+                    advertisedController = true
+                }
+            }
+
+            // Apollo 0.4.6 does not create a ViGEm pad from the controller
+            // mask in /launch. It only does so after ControllerConnect reaches
+            // the live control channel, which is normally delayed until the
+            // browser exposes a physical pad after its first button press.
+            // Advertise the launch-reserved slot immediately so a host-side
+            // launcher can see XInput before it starts scan-once games.
+            if (!advertisedController) {
+                this.sendControllerAdd(0, SUPPORTED_BUTTONS, this.emptyControllerCapabilities())
+                this.placeholderControllerAdvertised = true
+            } else {
+                this.placeholderControllerAdvertised = false
+            }
+        }
         this.registerBufferedControllers()
     }
 
@@ -895,9 +929,10 @@ export class StreamInput {
         return actuators
     }
 
-    // TODO: look at the controller code again
     private gamepads: Array<{ gamepadIndex: number, oldState: GamepadState } | null> = []
+    private singleControllerState: GamepadState = emptyGamepadState()
     private gamepadRumbleInterval: number | null = null
+    private placeholderControllerAdvertised = false
 
     onGamepadConnect(gamepad: Gamepad) {
         if (!this.connected) {
@@ -927,10 +962,30 @@ export class StreamInput {
             this.gamepadRumbleInterval = window.setInterval(this.onGamepadRumbleInterval.bind(this), CONTROLLER_RUMBLE_INTERVAL_MS - 10)
         }
 
-        // Reset rumble
-        this.gamepadRumbleCurrent[0] = { lowFrequencyMotor: 0, highFrequencyMotor: 0, leftTrigger: 0, rightTrigger: 0 }
+        // Reset rumble for this browser Gamepad API index. Those indexes are
+        // not guaranteed to match Moonlight's compact local controller ids.
+        this.gamepadRumbleCurrent[gamepad.index] = { lowFrequencyMotor: 0, highFrequencyMotor: 0, leftTrigger: 0, rightTrigger: 0 }
 
-        let capabilities: ControllerCapabilities = {
+        const capabilities = this.controllerCapabilities(gamepad)
+
+        if (this.config.controllerConfig.multiControllerMode == "auto") {
+            if (id == 0 && this.placeholderControllerAdvertised) {
+                // Slot 0 already exists on the host. Adopt it instead of
+                // sending a duplicate arrival when the browser finally
+                // reveals the real physical controller.
+                this.placeholderControllerAdvertised = false
+            } else {
+                this.sendControllerAdd(id, SUPPORTED_BUTTONS, capabilities)
+            }
+        }
+
+        if (gamepad.mapping != "standard") {
+            console.warn(`[Gamepad]: Unable to read values of gamepad with mapping ${gamepad.mapping}`)
+        }
+    }
+
+    private emptyControllerCapabilities(): ControllerCapabilities {
+        return {
             analogTriggers: false,
             rumble: false,
             triggerRumble: false,
@@ -939,6 +994,13 @@ export class StreamInput {
             gyro: false,
             batteryState: false,
             rgbLed: false
+        }
+    }
+
+    private controllerCapabilities(gamepad: Gamepad | null): ControllerCapabilities {
+        const capabilities = this.emptyControllerCapabilities()
+        if (!gamepad) {
+            return capabilities
         }
 
         // Rumble capabilities
@@ -964,18 +1026,23 @@ export class StreamInput {
             }
         }
 
-        this.sendControllerAdd(this.gamepads.length - 1, SUPPORTED_BUTTONS, capabilities)
+        return capabilities
+    }
 
-        if (gamepad.mapping != "standard") {
-            console.warn(`[Gamepad]: Unable to read values of gamepad with mapping ${gamepad.mapping}`)
+    private mergeControllerCapabilities(
+        target: ControllerCapabilities,
+        source: ControllerCapabilities,
+    ): ControllerCapabilities {
+        for (const capability of Object.keys(target) as Array<keyof ControllerCapabilities>) {
+            target[capability] ||= source[capability]
         }
+        return target
     }
     onGamepadDisconnect(event: GamepadEvent) {
         const index = this.gamepads.findIndex(value => value?.gamepadIndex == event.gamepad.index)
         if (index != -1) {
-            const id = this.gamepads[index]?.gamepadIndex
-            if (id != null) {
-                this.sendControllerRemove(id)
+            if (this.config.controllerConfig.multiControllerMode == "auto") {
+                this.sendControllerRemove(index)
             }
 
             this.gamepads[index] = null
@@ -992,10 +1059,28 @@ export class StreamInput {
             this.lastGamepadUpdate = performance.now()
         }
 
+        if (this.config.controllerConfig.multiControllerMode == "single") {
+            const states: GamepadState[] = []
+            for (const entry of this.gamepads) {
+                if (!entry) continue
+                const gamepad = navigator.getGamepads()[entry.gamepadIndex]
+                if (gamepad?.mapping == "standard") {
+                    states.push(extractGamepadState(gamepad, this.config.controllerConfig))
+                }
+            }
+
+            const state = mergeGamepadStates(states)
+            if (!areGamepadStatesEqual(state, this.singleControllerState)) {
+                this.singleControllerState = state
+                this.sendController(0, state)
+            }
+            return
+        }
+
         for (let gamepadId = 0; gamepadId < this.gamepads.length; gamepadId++) {
             const oldGamepadState = this.gamepads[gamepadId]
             if (oldGamepadState == null) {
-                return
+                continue
             }
             const gamepad = navigator.getGamepads()[oldGamepadState.gamepadIndex]
             if (!gamepad) {
@@ -1007,7 +1092,7 @@ export class StreamInput {
             }
 
             const state = extractGamepadState(gamepad, this.config.controllerConfig)
-            if (state == oldGamepadState.oldState) {
+            if (areGamepadStatesEqual(state, oldGamepadState.oldState)) {
                 continue
             }
             oldGamepadState.oldState = state
@@ -1031,25 +1116,29 @@ export class StreamInput {
             const lowFrequencyMotor = this.buffer.getU16() / U16_MAX
             const highFrequencyMotor = this.buffer.getU16() / U16_MAX
 
-            const gamepadIndex = this.gamepads[id]?.gamepadIndex
-            if (gamepadIndex == null) {
-                return
+            const gamepadIndexes = this.gamepadIndexesForController(id)
+            for (const gamepadIndex of gamepadIndexes) {
+                this.setGamepadEffect(gamepadIndex, "dual-rumble", { lowFrequencyMotor, highFrequencyMotor })
             }
-
-            this.setGamepadEffect(gamepadIndex, "dual-rumble", { lowFrequencyMotor, highFrequencyMotor })
         } else if (ty == 1) {
             // Trigger Rumble
             const id = this.buffer.getU8()
             const leftTrigger = this.buffer.getU16() / U16_MAX
             const rightTrigger = this.buffer.getU16() / U16_MAX
 
-            const gamepadIndex = this.gamepads[id]?.gamepadIndex
-            if (gamepadIndex == null) {
-                return
+            const gamepadIndexes = this.gamepadIndexesForController(id)
+            for (const gamepadIndex of gamepadIndexes) {
+                this.setGamepadEffect(gamepadIndex, "trigger-rumble", { leftTrigger, rightTrigger })
             }
-
-            this.setGamepadEffect(gamepadIndex, "trigger-rumble", { leftTrigger, rightTrigger })
         }
+    }
+
+    private gamepadIndexesForController(id: number): number[] {
+        if (this.config.controllerConfig.multiControllerMode == "single" && id == 0) {
+            return this.gamepads.flatMap(gamepad => gamepad ? [gamepad.gamepadIndex] : [])
+        }
+        const gamepadIndex = this.gamepads[id]?.gamepadIndex
+        return gamepadIndex == null ? [] : [gamepadIndex]
     }
 
     // -- Controller rumble

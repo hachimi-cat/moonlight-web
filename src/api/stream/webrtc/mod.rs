@@ -7,7 +7,7 @@ use actix_web::HttpRequest;
 use actix_web::body::{BoxBody, MessageBody};
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
-use actix_web::web::{Data, Path};
+use actix_web::web::{Data, Path, Query};
 use actix_web::{
     HttpResponse, HttpResponseBuilder, delete, get, http::StatusCode, http::header, options, patch,
     post,
@@ -29,10 +29,14 @@ use moonlight_common::webrtc::answer::WebRTCSessionAnswer;
 use moonlight_common::webrtc::header::WebRTCLinkHeader;
 use moonlight_common::webrtc::offer::WebRTCSessionOffer;
 use moonlight_common::webrtc::sdp::Session;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{self};
+use tokio::sync::{
+    mpsc::{self},
+    watch,
+};
 use tokio::time::sleep;
 use tokio::{select, spawn};
 use tracing::{Instrument, debug, debug_span, error, info, instrument, warn};
@@ -52,9 +56,9 @@ use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability, RTPCodecType,
 };
 
-use crate::api::stream::apply_role_restrictions;
 use crate::api::stream::webrtc::convert::{into_webrtc_ice_candidate, into_webrtc_network_type};
 use crate::api::stream::webrtc::ice_servers::generate_ice_servers;
+use crate::api::stream::{apply_role_restrictions, stop_conflicting_app};
 use crate::app::App;
 use crate::app::host::HostId;
 use crate::app::stream::{ExternalStreamEvent, Stream, StreamId};
@@ -66,6 +70,14 @@ mod convert;
 mod ice_servers;
 mod stream;
 mod video;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WebRtcGamepadQuery {
+    #[serde(default)]
+    gamepads_attached: u16,
+    #[serde(default)]
+    gamepads_persist_after_disconnect: bool,
+}
 
 pub async fn webrtc_middleware(
     mut req: ServiceRequest,
@@ -200,11 +212,12 @@ fn create_media_engine(video_formats: &HashMap<VideoFormat, RTCRtpCodecParameter
 }
 
 #[post("")]
-#[instrument(skip(app, user, req, session_description), fields(user = %user.id()))]
+#[instrument(skip(app, user, req, gamepads, session_description), fields(user = %user.id()))]
 pub async fn webrtc_post(
     app: Data<App>,
     mut user: AuthenticatedUser,
     req: HttpRequest,
+    gamepads: Query<WebRtcGamepadQuery>,
     session_description: String,
 ) -> Result<HttpResponse, AppError> {
     if !user
@@ -239,6 +252,7 @@ pub async fn webrtc_post(
 
     // Get app
     let app_id = AppId(session.app_id);
+    stop_conflicting_app(&host, app_id).await?;
 
     // Create offer based on the sdp
     let offer = RTCSessionDescription::offer(session_description)?;
@@ -364,8 +378,8 @@ pub async fn webrtc_post(
         local_audio_play_mode: session.local_audio_play_mode,
         // TODO: what audio config?
         audio_config: AudioConfig::STEREO,
-        gamepads_attached: ActiveGamepads::empty(),
-        gamepads_persist_after_disconnect: false,
+        gamepads_attached: ActiveGamepads::from_bits_retain(gamepads.gamepads_attached),
+        gamepads_persist_after_disconnect: gamepads.gamepads_persist_after_disconnect,
         enable_mic: microphone_enabled,
     };
 
@@ -505,6 +519,8 @@ pub async fn webrtc_post(
 
     info!("ice gathering completed, sending answer to client");
 
+    let (stop_sender, stop_receiver) = watch::channel(false);
+
     spawn({
         let peer = peer.clone();
 
@@ -515,6 +531,7 @@ pub async fn webrtc_post(
                 audio_channel,
                 video_channel,
                 control_channel,
+                stop_receiver,
             )
             .await
             {
@@ -545,6 +562,7 @@ pub async fn webrtc_post(
 
     spawn({
         let peer = peer.clone();
+        let stop_sender = stop_sender.clone();
 
         async move {
             loop {
@@ -587,10 +605,8 @@ pub async fn webrtc_post(
                     }
                     ExternalStreamEvent::Stop => {
                         info!("closing the stream");
-
-                        if let Err(err) = peer.close().await {
-                            warn!(error = %err, "error whilst closing the webrtc peer");
-                        }
+                        let _ = stop_sender.send(true);
+                        return;
                     }
                 }
             }
@@ -671,4 +687,31 @@ pub async fn webrtc_delete(
     Ok(HttpResponse::Ok()
         .finish()
         .set_body(BoxBody::new("stream not found")))
+}
+
+/// Stop every stream the authenticated caller is allowed to control.
+///
+/// Stream IDs are intentionally opaque and may become random while a recently
+/// closed stream is still retained. A host-side lifecycle hook therefore
+/// cannot safely discover the current stream by probing numeric IDs.
+#[delete("")]
+#[instrument(skip(app, user), fields(user = %user.id()))]
+pub async fn webrtc_delete_all(
+    app: Data<App>,
+    mut user: AuthenticatedUser,
+) -> Result<HttpResponse, AppError> {
+    let streams = app.streams().await;
+    let mut stopped = 0;
+
+    for stream in streams {
+        if stream
+            .send_event(&mut user, ExternalStreamEvent::Stop)
+            .await
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+
+    Ok(HttpResponse::Ok().body(stopped.to_string()))
 }

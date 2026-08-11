@@ -2,30 +2,10 @@ import { Component, ComponentEvent } from "./index"
 import { getLocalStreamSettings, globalDefaultSettings } from "./settings_menu"
 import { getCurrentLanguage, getTranslations } from "../i18n"
 
-export class ElementWithLabel implements Component {
-    protected div: HTMLDivElement = document.createElement("div")
-    protected label: HTMLLabelElement = document.createElement("label")
-
-    constructor(internalName: string, displayName?: string) {
-        const i = getTranslations(getCurrentLanguage()).common
-        if (displayName) {
-            this.label.htmlFor = internalName
-            this.label.innerText = displayName
-            this.div.appendChild(this.label)
-        }
-    }
-
-    mount(parent: HTMLElement): void {
-        parent.appendChild(this.div)
-    }
-    unmount(parent: HTMLElement): void {
-        parent.removeChild(this.div)
-    }
-
-    mountBefore(parent: HTMLElement, before: ElementWithLabel): void {
-        parent.insertBefore(this.div, before.div)
-    }
-}
+// Moved to ./element_with_label to break the input -> settings_menu -> ui
+// -> input cycle. Re-exported so existing importers are unaffected.
+import { ElementWithLabel } from "./element_with_label"
+export { ElementWithLabel }
 
 export type InputInit = {
     defaultValue?: string
@@ -45,7 +25,10 @@ export type InputInit = {
     }
 }
 
-export type InputChangeListener = (event: ComponentEvent<InputComponent>) => void
+// Widened from ComponentEvent<InputComponent> so the React-backed drop-ins in
+// web/ui can dispatch the same `ml-change` event. Handlers that need the
+// concrete component read it off `event.component` and narrow there.
+export type InputChangeListener = (event: ComponentEvent<Component>) => void
 
 export class InputComponent extends ElementWithLabel {
 

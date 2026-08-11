@@ -1,6 +1,7 @@
 import { PostRoleRequest, RoleType } from "../../api_bindings"
 import { getCurrentLanguage, getTranslations } from "../../i18n"
-import { InputComponent, SelectComponent } from "../input"
+import { ShadcnInputComponent as InputComponent } from "../../ui/shadcn-input"
+import { ShadcnSelectComponent as SelectComponent } from "../../ui/shadcn-select"
 import { FormModal } from "../modal/form"
 import { globalDefaultSettings, StreamSettingsComponent } from "../settings_menu"
 import { RolePermissionsMenu } from "./permissions"

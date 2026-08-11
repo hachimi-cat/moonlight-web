@@ -1,7 +1,7 @@
 import { Api, apiWebRTCConfiguration, apiWebRTCOffer } from "../api"
 import { Component } from "../component/index"
 import { Settings, TransportType } from "../component/settings_menu"
-import { ControlPacket, ControlPacket_Tags, VideoFormats } from "../uniffi/moonlight_common_bindings"
+import { ControlPacket, ControlPacket_Tags, TerminationReason, TerminationReason_Tags, VideoFormats } from "../uniffi/moonlight_common_bindings"
 import { wait } from "../util"
 import { AudioPlayer, AudioPlayerSetup } from "./audio/index"
 import { buildAudioPipeline } from "./audio/pipeline"
@@ -16,6 +16,7 @@ import { allVideoCodecs, andVideoCodecs, emptyVideoCodecs, hasAnyCodec } from ".
 import { VideoRenderer, VideoRendererSetup } from "./video/index"
 import { buildVideoPipeline, queryVideoPipelineInfo, VideoPipelineOptions } from "./video/pipeline"
 import { StreamPermissions } from "../api_bindings"
+import { gamepadLaunchSettings } from "./gamepad"
 
 export type ExecutionEnvironment = {
     main: boolean
@@ -30,9 +31,34 @@ export type InfoEvent = CustomEvent<
     { type: "app", appName: string } |
     { type: "connectionComplete", capabilities: StreamCapabilities } |
     { type: "videoReady" } |
-    { type: "addDebugLine", line: string, additional?: LogMessageInfo }
+    { type: "addDebugLine", line: string, additional?: LogMessageInfo } |
+    // A stream that WAS up has ended. `graceful` distinguishes the host
+    // closing the app (quit — the page may auto-close on it) from the
+    // connection dying underneath a live stream (the page must say so,
+    // and closing the tab would destroy the evidence).
+    { type: "streamEnded", graceful: boolean }
 >
 export type InfoEventListener = (event: InfoEvent) => void
+
+/**
+ * Did the host end the stream on purpose?
+ *
+ * The wire value is NVST_DISCONN_SERVER_TERMINATED_CLOSED (0x80030023),
+ * which moonlight-common-c treats as ML_ERROR_GRACEFUL_TERMINATION — a
+ * user-initiated quit. Everything else is an error code describing how the
+ * stream broke. GFE's short form reports the same intent as 0.
+ */
+export function isGracefulTermination(reason: TerminationReason): boolean {
+    const code = reason.inner[0]
+
+    if (reason.tag == TerminationReason_Tags.Long) {
+        return code == GRACEFUL_TERMINATION_CODE
+    }
+    return code == 0
+}
+
+/** NVST_DISCONN_SERVER_TERMINATED_CLOSED */
+const GRACEFUL_TERMINATION_CODE = 0x80030023
 
 export function getStreamerSize(settings: Settings, viewerScreenSize: [number, number]): [number, number] {
     let width, height
@@ -164,17 +190,38 @@ export class Stream implements Component {
         const desiredTransport = this.transportOverride ?? this.settings.dataTransport
         this.debugLog(`Using transport: ${desiredTransport}`)
 
+        let shutdown: TransportShutdown | undefined
         if (desiredTransport == "auto") {
-            let shutdownReason = await this.tryWebRTCTransport()
+            shutdown = await this.tryWebRTCTransport()
 
-            if (shutdownReason == "failednoconnect") {
+            if (shutdown == "failednoconnect") {
                 this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" })
-                await this.tryWebSocketTransport()
+                shutdown = await this.tryWebSocketTransport()
             }
         } else if (desiredTransport == "webrtc") {
-            await this.tryWebRTCTransport()
+            shutdown = await this.tryWebRTCTransport()
         } else if (desiredTransport == "websocket") {
-            await this.tryWebSocketTransport()
+            shutdown = await this.tryWebSocketTransport()
+        }
+
+        // "disconnect"/"failed" only come out of a transport's onclose, and
+        // the try functions return that promise strictly AFTER onConnect ran
+        // — so reaching here with either means a live stream ENDED, which is
+        // not the "could not connect" story the fatal modal below tells. A
+        // graceful ServerTermination dispatches this event earlier; the
+        // one-shot helper makes this later transport shutdown a no-op.
+        // Before this branch a host quitting the game surfaced as "Tried all
+        // configured transport options but no connection was possible".
+        //
+        // Gracefulness comes from the host's ServerTermination packet, NOT
+        // from `shutdown`: no transport has ever produced "disconnect" (both
+        // emit only "failed"/"failednoconnect"), so testing for it made
+        // `graceful` permanently false and the auto-close branch downstream
+        // unreachable — the tab never closed and every clean quit was
+        // reported to the player as a lost connection.
+        if (shutdown == "disconnect" || shutdown == "failed") {
+            this.dispatchStreamEnded(shutdown == "disconnect" || this.serverTerminationGraceful)
+            return
         }
 
         this.debugLog("Tried all configured transport options but no connection was possible", { type: "fatal" })
@@ -205,6 +252,12 @@ export class Stream implements Component {
             return null
         }
 
+        const connectedGamepads = Array.from(navigator.getGamepads()).filter(gamepad => gamepad != null).length
+        const gamepads = gamepadLaunchSettings(
+            this.settings.controllerConfig.multiControllerMode,
+            connectedGamepads,
+        )
+
         return {
             hostId: this.hostId,
             appId: this.appId,
@@ -214,6 +267,8 @@ export class Stream implements Component {
             bitrate: this.settings.bitrate,
             hdr: this.settings.hdr,
             localAudioPlayMode: this.settings.playAudioLocal,
+            gamepadsAttached: gamepads.attachedMask,
+            gamepadsPersistAfterDisconnect: gamepads.persistAfterDisconnect,
             supportedCodecs: dataCodecs,
             preferredCodecs: codecHint,
         }
@@ -260,7 +315,10 @@ export class Stream implements Component {
 
             // Send Request
             this.debugLog("Sending Offer and waiting for Answer")
-            const answer = await apiWebRTCOffer(this.api, offer)
+            const answer = await apiWebRTCOffer(this.api, offer, {
+                attached: options.gamepadsAttached,
+                persistAfterDisconnect: options.gamepadsPersistAfterDisconnect,
+            })
             this.debugLog("Got Response")
 
             // Apply answer
@@ -576,8 +634,48 @@ export class Stream implements Component {
             case ControlPacket_Tags.ControllerRumbleTriggers:
                 // TODO
                 break
+            case ControlPacket_Tags.ServerTermination:
+                // The ONLY signal that says the host ended the stream on
+                // purpose (the player quit the game) rather than the
+                // connection dying. The transports cannot know this — a
+                // peer connection reaching "closed" looks identical either
+                // way — so it is recorded here and read once the transport
+                // actually closes. Relayed to us by the server's webrtc
+                // loop, which forwards every host control packet.
+                this.serverTerminationGraceful = isGracefulTermination(packet.inner.reason)
+                this.debugLog(`server terminated the stream (graceful: ${this.serverTerminationGraceful})`)
+
+                // ServerTermination is the definitive end-of-game signal.
+                // Do not wait for the host-side Moonlight transport to die:
+                // Apollo can spend tens of seconds reverting the virtual
+                // display before it closes that connection. Notify the UI
+                // immediately, then close our local transport so non-auto-
+                // closing clients also stop rendering the stale stream.
+                if (this.serverTerminationGraceful) {
+                    this.dispatchStreamEnded(true)
+                    this.transport?.close().catch(error => {
+                        this.debugLog(`failed to close transport after server termination: ${error}`)
+                    })
+                }
+                break
         }
         // TODO
+    }
+
+    /** Set when the host said it was ending the stream deliberately. */
+    private serverTerminationGraceful = false
+    private streamEndedDispatched = false
+
+    private dispatchStreamEnded(graceful: boolean) {
+        if (this.streamEndedDispatched) {
+            return
+        }
+        this.streamEndedDispatched = true
+
+        const event: InfoEvent = new CustomEvent("stream-info", {
+            detail: { type: "streamEnded", graceful }
+        })
+        this.eventTarget.dispatchEvent(event)
     }
 
     // -- Class Api
