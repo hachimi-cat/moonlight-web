@@ -392,8 +392,8 @@ export async function apiDeleteRole(api: Api, query: DeleteRoleQuery): Promise<v
 export async function apiGetHosts(api: Api): Promise<StreamedJsonResponse<GetHostsResponse, UndetailedHost>> {
     return await fetchApi<GetHostsResponse, UndetailedHost>(api, "/hosts", GET, { response: "jsonStreaming" })
 }
-export async function apiGetHost(api: Api, query: GetHostQuery): Promise<DetailedHost> {
-    const response = await fetchApi(api, "/host", GET, { query })
+export async function apiGetHost(api: Api, query: GetHostQuery, timeout?: number): Promise<DetailedHost> {
+    const response = await fetchApi(api, "/host", GET, { query }, timeout)
 
     return (response as GetHostResponse).host
 }

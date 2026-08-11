@@ -1,6 +1,6 @@
 import "./polyfill/index"
 import "./styles/index"
-import { Api, apiGetRole, getApi } from "./api"
+import { Api, apiGetHost, apiGetRole, getApi } from "./api"
 import { Component } from "./component/index"
 import { showNotification } from "./component/notification"
 import { getModalBackground, showMessage, showModal } from "./component/modal/index"
@@ -18,6 +18,7 @@ import { adoptRoleDefaultLanguage, getCurrentLanguage, getTranslations, Language
 import { requestKeyboardLock } from "./iframe"
 import { InfoEvent, Stream, StreamCapabilities } from "./stream/index"
 import { ConnectionInfoModal } from "./component/connection_info_modal"
+import { wait } from "./util"
 
 let I = getTranslations(getCurrentLanguage())
 
@@ -156,6 +157,8 @@ startApp()
 
 class ViewerApp implements Component {
     private api: Api
+    private hostId: number
+    private appId: number
 
     private sidebar: ViewerSidebar
 
@@ -182,6 +185,8 @@ class ViewerApp implements Component {
 
     constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>) {
         this.api = api
+        this.hostId = hostId
+        this.appId = appId
 
         const defaultSettings = getLocalStreamSettings(bootstrapRole.default_settings)
         const settings = {
@@ -329,12 +334,12 @@ class ViewerApp implements Component {
             this.armFullscreenOnNextInteraction()
         } else if (data.type == "streamEnded") {
             // Quit-the-game closes the tab, but ONLY when the embedder asked
-            // for it (?autoclose=1) and only on a graceful end — a dropped
-            // connection closing the tab would destroy the one screen that
-            // can tell the player what happened. pawpado's game tiles pass
-            // the flag; its Open Desktop button does not.
-            const autoClose = new URLSearchParams(window.location.search).get("autoclose") == "1"
-            if (data.graceful && autoClose) {
+            // for it (?autoclose=1). A ServerTermination packet is the best
+            // signal, but Apollo does not send one on every app-exit path. If
+            // it is absent, confirm that the host is still reachable and no
+            // longer reports this app as current before closing. A dropped
+            // connection must leave the tab open so it can explain the loss.
+            if (await this.shouldAutoClose(data.graceful)) {
                 if (window.matchMedia('(display-mode: standalone)').matches) {
                     history.back()
                 } else {
@@ -346,6 +351,41 @@ class ViewerApp implements Component {
             // the frozen last frame.
             await showMessage(data.graceful ? I.stream.streamEnded : I.stream.connectionLost)
         }
+    }
+
+    private async shouldAutoClose(graceful: boolean): Promise<boolean> {
+        const requested = new URLSearchParams(window.location.search).get("autoclose") == "1"
+        if (!requested) {
+            return false
+        }
+        if (graceful) {
+            return true
+        }
+
+        // Apollo can update current_game just after the stream transport
+        // closes, so allow a short settling window. Fail closed: an offline
+        // host or an API error is a connection-loss screen, not an auto-close.
+        for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) {
+                await wait(500)
+            }
+
+            let host
+            try {
+                host = await apiGetHost(this.api, { host_id: this.hostId }, 2000)
+            } catch {
+                return false
+            }
+
+            if (host.server_state == null) {
+                return false
+            }
+            if (host.current_game != this.appId) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private focusInput() {
