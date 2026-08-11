@@ -1,12 +1,16 @@
 use moonlight_common::stream::{
     proto::{
         audio::AudioStreamEvent,
-        control::{ControlStreamEvent, packet::ControlPacket},
+        control::{
+            ControlStreamEvent,
+            packet::{ControlPacket, TerminationReason},
+        },
         video::VideoStreamEvent,
     },
     tokio::{MoonlightStream, MoonlightStreamEvent},
 };
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::{select, time::timeout};
 use tracing::{debug, info, warn};
 use webrtc::peer_connection::{RTCPeerConnection, peer_connection_state::RTCPeerConnectionState};
@@ -64,6 +68,7 @@ pub async fn webrtc_loop(
     mut audio_channel: AudioChannel,
     mut video_channel: VideoChannel,
     mut control_channel: ControlChannel,
+    mut external_stop: watch::Receiver<bool>,
 ) -> Result<(), AppError> {
     info!("started main webrtc loop");
 
@@ -86,6 +91,16 @@ pub async fn webrtc_loop(
         }
 
         select! {
+            result = external_stop.changed() => {
+                if result.is_err() || *external_stop.borrow() {
+                    info!("stopping stream after an external request");
+                    control_channel.send(ControlPacket::ServerTermination {
+                        reason: TerminationReason::GRACEFUL,
+                    });
+                    flush_control_channel(&mut control_channel).await;
+                    break;
+                }
+            }
             result = stream.drive() => {
                 if moonlight_disconnected {
                     continue;

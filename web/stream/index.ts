@@ -207,7 +207,9 @@ export class Stream implements Component {
         // "disconnect"/"failed" only come out of a transport's onclose, and
         // the try functions return that promise strictly AFTER onConnect ran
         // — so reaching here with either means a live stream ENDED, which is
-        // not the "could not connect" story the fatal modal below tells.
+        // not the "could not connect" story the fatal modal below tells. A
+        // graceful ServerTermination dispatches this event earlier; the
+        // one-shot helper makes this later transport shutdown a no-op.
         // Before this branch a host quitting the game surfaced as "Tried all
         // configured transport options but no connection was possible".
         //
@@ -218,13 +220,7 @@ export class Stream implements Component {
         // unreachable — the tab never closed and every clean quit was
         // reported to the player as a lost connection.
         if (shutdown == "disconnect" || shutdown == "failed") {
-            const event: InfoEvent = new CustomEvent("stream-info", {
-                detail: {
-                    type: "streamEnded",
-                    graceful: shutdown == "disconnect" || this.serverTerminationGraceful,
-                }
-            })
-            this.eventTarget.dispatchEvent(event)
+            this.dispatchStreamEnded(shutdown == "disconnect" || this.serverTerminationGraceful)
             return
         }
 
@@ -648,6 +644,19 @@ export class Stream implements Component {
                 // loop, which forwards every host control packet.
                 this.serverTerminationGraceful = isGracefulTermination(packet.inner.reason)
                 this.debugLog(`server terminated the stream (graceful: ${this.serverTerminationGraceful})`)
+
+                // ServerTermination is the definitive end-of-game signal.
+                // Do not wait for the host-side Moonlight transport to die:
+                // Apollo can spend tens of seconds reverting the virtual
+                // display before it closes that connection. Notify the UI
+                // immediately, then close our local transport so non-auto-
+                // closing clients also stop rendering the stale stream.
+                if (this.serverTerminationGraceful) {
+                    this.dispatchStreamEnded(true)
+                    this.transport?.close().catch(error => {
+                        this.debugLog(`failed to close transport after server termination: ${error}`)
+                    })
+                }
                 break
         }
         // TODO
@@ -655,6 +664,19 @@ export class Stream implements Component {
 
     /** Set when the host said it was ending the stream deliberately. */
     private serverTerminationGraceful = false
+    private streamEndedDispatched = false
+
+    private dispatchStreamEnded(graceful: boolean) {
+        if (this.streamEndedDispatched) {
+            return
+        }
+        this.streamEndedDispatched = true
+
+        const event: InfoEvent = new CustomEvent("stream-info", {
+            detail: { type: "streamEnded", graceful }
+        })
+        this.eventTarget.dispatchEvent(event)
+    }
 
     // -- Class Api
     addInfoListener(listener: InfoEventListener) {

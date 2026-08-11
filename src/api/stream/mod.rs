@@ -13,8 +13,8 @@ pub mod webrtc;
 fn server_version() -> ServerVersion {
     ServerVersion::new(7, 0, 0, 0)
 }
-fn create_control_packet_config() -> ControlPacketConfig {
-    ControlPacketConfig::new(server_version(), true).expect("control packet config")
+fn create_control_packet_config(encrypted: bool) -> ControlPacketConfig {
+    ControlPacketConfig::new(server_version(), encrypted).expect("control packet config")
 }
 
 /// IMPORTANT: This doesn't handle transport restrictions!

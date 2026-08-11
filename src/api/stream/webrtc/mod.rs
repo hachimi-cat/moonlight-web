@@ -33,7 +33,10 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{self};
+use tokio::sync::{
+    mpsc::{self},
+    watch,
+};
 use tokio::time::sleep;
 use tokio::{select, spawn};
 use tracing::{Instrument, debug, debug_span, error, info, instrument, warn};
@@ -515,6 +518,8 @@ pub async fn webrtc_post(
 
     info!("ice gathering completed, sending answer to client");
 
+    let (stop_sender, stop_receiver) = watch::channel(false);
+
     spawn({
         let peer = peer.clone();
 
@@ -525,6 +530,7 @@ pub async fn webrtc_post(
                 audio_channel,
                 video_channel,
                 control_channel,
+                stop_receiver,
             )
             .await
             {
@@ -555,6 +561,7 @@ pub async fn webrtc_post(
 
     spawn({
         let peer = peer.clone();
+        let stop_sender = stop_sender.clone();
 
         async move {
             loop {
@@ -597,10 +604,8 @@ pub async fn webrtc_post(
                     }
                     ExternalStreamEvent::Stop => {
                         info!("closing the stream");
-
-                        if let Err(err) = peer.close().await {
-                            warn!(error = %err, "error whilst closing the webrtc peer");
-                        }
+                        let _ = stop_sender.send(true);
+                        return;
                     }
                 }
             }

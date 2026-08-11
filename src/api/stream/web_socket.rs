@@ -87,7 +87,7 @@ async fn handle_ws(
     mut ws_sender: Session,
     mut ws_receiver: MessageStream,
 ) -> Result<(), AppError> {
-    let control_config = create_control_packet_config();
+    let control_config = create_control_packet_config(true);
 
     // See if the user is allowed to use web sockets
     let permissions = user.role().await?.permissions().await?;
