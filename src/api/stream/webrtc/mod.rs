@@ -77,6 +77,8 @@ pub struct WebRtcGamepadQuery {
     gamepads_attached: u16,
     #[serde(default)]
     gamepads_persist_after_disconnect: bool,
+    #[serde(default)]
+    resume_current_app: bool,
 }
 
 pub async fn webrtc_middleware(
@@ -252,7 +254,7 @@ pub async fn webrtc_post(
 
     // Get app
     let app_id = AppId(session.app_id);
-    stop_conflicting_app(&host, app_id).await?;
+    stop_conflicting_app(&host, app_id, gamepads.resume_current_app).await?;
 
     // Create offer based on the sdp
     let offer = RTCSessionDescription::offer(session_description)?;
@@ -520,6 +522,7 @@ pub async fn webrtc_post(
     info!("ice gathering completed, sending answer to client");
 
     let (stop_sender, stop_receiver) = watch::channel(false);
+    let (stopped_sender, stopped_receiver) = watch::channel(false);
 
     spawn({
         let peer = peer.clone();
@@ -543,13 +546,15 @@ pub async fn webrtc_post(
             if let Err(err) = peer.close().await {
                 warn!(error = %err, "failed to close webrtc peer");
             }
+
+            let _ = stopped_sender.send(true);
         }
         .instrument(debug_span!("moonlight stream"))
     });
 
     // Add stream to the list of streams
     let (event_sender, mut event_receiver) = mpsc::channel(20);
-    let stream = match Stream::new(&app, &user, event_sender).await {
+    let stream = match Stream::new(&app, &user, event_sender, stopped_receiver).await {
         Ok(value) => value,
         Err(err) => {
             // TODO: cleanup the stream
@@ -680,9 +685,12 @@ pub async fn webrtc_delete(
 
     let stream = app.stream_by_id(stream_id).await?;
 
-    stream
-        .send_event(&mut user, ExternalStreamEvent::Stop)
+    let stopped = stream
+        .stop_and_wait(&mut user, Duration::from_secs(5))
         .await?;
+    if !stopped {
+        warn!(?stream_id, "timed out waiting for stream teardown");
+    }
 
     Ok(HttpResponse::Ok()
         .finish()

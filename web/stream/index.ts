@@ -253,6 +253,9 @@ export class Stream implements Component {
     }
 
     private transport: Transport | null = null
+    /** False for the first connection opened by this page. Once that stream
+     *  connects, transport fallback/recovery may resume the same host app. */
+    private resumeCurrentApp = false
 
     private setTransport(transport: Transport) {
         if (this.transport) {
@@ -294,6 +297,7 @@ export class Stream implements Component {
             localAudioPlayMode: this.settings.playAudioLocal,
             gamepadsAttached: gamepads.attachedMask,
             gamepadsPersistAfterDisconnect: gamepads.persistAfterDisconnect,
+            resumeCurrentApp: this.resumeCurrentApp,
             supportedCodecs: dataCodecs,
             preferredCodecs: codecHint,
         }
@@ -341,8 +345,11 @@ export class Stream implements Component {
             // Send Request
             this.debugLog("Sending Offer and waiting for Answer")
             const answer = await apiWebRTCOffer(this.api, offer, {
-                attached: options.gamepadsAttached,
-                persistAfterDisconnect: options.gamepadsPersistAfterDisconnect,
+                gamepads: {
+                    attached: options.gamepadsAttached,
+                    persistAfterDisconnect: options.gamepadsPersistAfterDisconnect,
+                },
+                resumeCurrentApp: options.resumeCurrentApp,
             })
             this.debugLog("Got Response")
 
@@ -430,6 +437,7 @@ export class Stream implements Component {
 
     private async onConnect(connectData: TransportConnectData) {
         this.logger.debug("connected successfully, creating video and audio pipelines")
+        this.resumeCurrentApp = true
 
         // Dispatch app event
         let event: InfoEvent = new CustomEvent("stream-info", {

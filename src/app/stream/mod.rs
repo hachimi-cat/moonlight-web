@@ -1,6 +1,10 @@
 use std::{ops::Deref, sync::Arc, time::Duration};
 
-use tokio::{spawn, sync::mpsc::Sender, time::sleep};
+use tokio::{
+    spawn,
+    sync::{mpsc::Sender, watch},
+    time::{sleep, timeout},
+};
 use tracing::{debug, warn};
 
 use crate::app::{
@@ -26,6 +30,7 @@ impl Stream {
         app: &App,
         owner: &AuthenticatedUser,
         event_sender: Sender<ExternalStreamEvent>,
+        stopped: watch::Receiver<bool>,
     ) -> Result<Self, AppError> {
         app.insert_stream(|id| {
             let app_ref = app.new_ref();
@@ -65,6 +70,7 @@ impl Stream {
                     id,
                     owner: owner.deref().clone(),
                     event_sender,
+                    stopped,
                 }),
             }
         })
@@ -105,6 +111,32 @@ impl Stream {
         Ok(())
     }
 
+    /// Ask the stream task to stop and wait until its Moonlight connection
+    /// and WebRTC peer have actually been torn down.
+    ///
+    /// Merely enqueueing `Stop` allowed a replacement stream to reach Apollo
+    /// while the old client was still alive. Apollo then assigned the same
+    /// browser controller to a second global XInput device, and the game's
+    /// controller identity changed when the old client eventually timed out.
+    pub async fn stop_and_wait(
+        &self,
+        user: &mut AuthenticatedUser,
+        max_wait: Duration,
+    ) -> Result<bool, AppError> {
+        let mut stopped = self.inner.stopped.clone();
+
+        self.send_event(user, ExternalStreamEvent::Stop).await?;
+
+        if *stopped.borrow() {
+            return Ok(true);
+        }
+
+        Ok(matches!(
+            timeout(max_wait, stopped.wait_for(|done| *done)).await,
+            Ok(Ok(_))
+        ))
+    }
+
     #[allow(unused)]
     pub fn is_alive(&self) -> Result<bool, AppError> {
         Ok(!self.inner.event_sender.is_closed())
@@ -115,4 +147,5 @@ pub(crate) struct StreamInner {
     pub(crate) id: StreamId,
     pub(crate) owner: User,
     pub(crate) event_sender: Sender<ExternalStreamEvent>,
+    pub(crate) stopped: watch::Receiver<bool>,
 }

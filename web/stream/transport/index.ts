@@ -28,6 +28,10 @@ export type TransportOptions = {
     localAudioPlayMode: boolean,
     gamepadsAttached: number,
     gamepadsPersistAfterDisconnect: boolean,
+    /** Resume the same Apollo app only for another transport attempt made by
+     *  this page. A newly opened page requests a fresh launch so changed
+     *  resolution/FPS settings cannot inherit an old host session. */
+    resumeCurrentApp: boolean,
     /// These are the available video codecs when using data transport
     supportedCodecs: VideoFormats,
     preferredCodecs?: VideoFormats,

@@ -431,6 +431,8 @@ pub struct WebSocketStreamRequest {
     pub gamepads_attached: u16,
     #[serde(default)]
     pub gamepads_persist_after_disconnect: bool,
+    #[serde(default)]
+    pub resume_current_app: bool,
     pub supported_codecs: u32,
     pub preferred_codecs: u32,
 }

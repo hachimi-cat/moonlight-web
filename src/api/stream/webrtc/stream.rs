@@ -28,6 +28,7 @@ use crate::{
 /// stream dies. Small: the queue holds a handful of packets and the peer is
 /// on its way out either way.
 const CONTROL_FLUSH_TIMEOUT: Duration = Duration::from_millis(1500);
+const MOONLIGHT_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Write out whatever the host sent us on its way down before tearing the
 /// peer connection apart.
@@ -60,6 +61,34 @@ async fn flush_control_channel(control_channel: &mut ControlChannel) {
         }
     })
     .await;
+}
+
+/// Complete ENet's disconnect handshake instead of dropping the UDP sockets
+/// and leaving Apollo to discover a dead client by timeout.
+///
+/// A socket-only drop makes Apollo keep sending media to closed ports for
+/// several seconds (and log a refusal every few milliseconds). Starting a
+/// replacement during that interval creates overlapping sessions and can
+/// move controller 0 to another global XInput slot.
+async fn finish_moonlight_disconnect(stream: &mut MoonlightStream, already_started: bool) {
+    if !already_started && let Err(err) = stream.disconnect() {
+        warn!(error = %err, "failed to start graceful moonlight disconnect");
+        return;
+    }
+
+    if timeout(MOONLIGHT_DISCONNECT_TIMEOUT, async {
+        while stream.is_alive() {
+            if let Err(err) = stream.drive().await {
+                warn!(error = %err, "moonlight disconnect handshake errored");
+                break;
+            }
+        }
+    })
+    .await
+    .is_err()
+    {
+        warn!("timed out completing moonlight disconnect handshake");
+    }
 }
 
 pub async fn webrtc_loop(
@@ -98,6 +127,7 @@ pub async fn webrtc_loop(
                         reason: TerminationReason::GRACEFUL,
                     });
                     flush_control_channel(&mut control_channel).await;
+                    finish_moonlight_disconnect(&mut stream, moonlight_disconnected).await;
                     break;
                 }
             }

@@ -36,6 +36,13 @@ export type StreamInputConfig = {
     controllerConfig: ControllerConfig
 }
 
+type TrackedGamepad = {
+    gamepadIndex: number
+    gamepadId: string
+    oldState: GamepadState
+    visible: boolean
+}
+
 export function defaultStreamInputConfig(): StreamInputConfig {
     return {
         mouseMode: "follow",
@@ -926,24 +933,26 @@ export class StreamInput {
     private syncVisibleGamepads() {
         const visible = navigator.getGamepads()
 
+        // Reconcile known slots first. This makes an old index available for
+        // adoption before processing a controller that Chrome has returned at
+        // a new Gamepad API index.
+        for (let id = 0; id < this.gamepads.length; id++) {
+            const entry = this.gamepads[id]
+            if (entry == null) continue
+
+            const gamepad = visible[entry.gamepadIndex]
+            if (gamepad == null) {
+                this.markGamepadUnavailable(id)
+            } else if (!entry.visible) {
+                this.onGamepadConnect(gamepad)
+            }
+        }
+
         for (const gamepad of visible) {
             if (gamepad == null) continue
             const known = this.gamepads.some(entry => entry?.gamepadIndex == gamepad.index)
             if (!known && !this.bufferedControllers.includes(gamepad.index)) {
                 this.onGamepadConnect(gamepad)
-            }
-        }
-
-        // Browsers normally send `gamepaddisconnected`, but reconcile a
-        // missed event too so reconnecting at the same API index is not
-        // mistaken for the stale controller.
-        for (let id = 0; id < this.gamepads.length; id++) {
-            const entry = this.gamepads[id]
-            if (entry != null && visible[entry.gamepadIndex] == null) {
-                if (this.connected && this.config.controllerConfig.multiControllerMode == "auto") {
-                    this.sendControllerRemove(id)
-                }
-                this.gamepads[id] = null
             }
         }
     }
@@ -960,10 +969,57 @@ export class StreamInput {
         return actuators
     }
 
-    private gamepads: Array<{ gamepadIndex: number, oldState: GamepadState } | null> = []
+    /**
+     * Keep Moonlight controller numbers stable for the lifetime of the stream.
+     *
+     * Chrome on Windows can briefly hide a Bluetooth/GameInput controller from
+     * `navigator.getGamepads()` even though it is still connected to Windows.
+     * Removing the host controller on the first missing snapshot makes that
+     * browser quirk a real ViGEm unplug inside the game. Some games then stop
+     * listening to the controller until the next button press exposes it again.
+     *
+     * A missing physical pad is therefore marked unavailable and neutralized,
+     * but its host slot remains reserved. A pad returning at a different
+     * browser index adopts the unavailable slot rather than creating another
+     * virtual Xbox controller.
+     */
+    private gamepads: Array<TrackedGamepad | null> = []
     private singleControllerState: GamepadState = emptyGamepadState()
     private gamepadRumbleInterval: number | null = null
     private placeholderControllerAdvertised = false
+
+    private markGamepadUnavailable(id: number) {
+        const entry = this.gamepads[id]
+        if (entry == null || !entry.visible) return
+
+        entry.visible = false
+
+        // Release any button/stick that was held when Chrome hid the pad, but
+        // deliberately do not send ControllerDisconnect. The launch request
+        // asks Apollo to persist controllers, and keeping this slot alive is
+        // what prevents a transient browser dropout from becoming an in-game
+        // device removal.
+        const neutral = emptyGamepadState()
+        if (!areGamepadStatesEqual(entry.oldState, neutral)) {
+            entry.oldState = neutral
+            if (this.connected) this.sendController(id, neutral)
+        }
+    }
+
+    private reusableGamepadSlot(gamepad: Gamepad): number {
+        const visible = navigator.getGamepads()
+        const unavailable = (entry: TrackedGamepad) =>
+            !entry.visible || visible[entry.gamepadIndex] == null
+
+        // Prefer the same physical device if Chrome assigned it a new index,
+        // then fall back to any currently unavailable host slot.
+        const sameDevice = this.gamepads.findIndex(entry =>
+            entry != null && unavailable(entry) && entry.gamepadId == gamepad.id
+        )
+        if (sameDevice != -1) return sameDevice
+
+        return this.gamepads.findIndex(entry => entry != null && unavailable(entry))
+    }
 
     onGamepadConnect(gamepad: Gamepad) {
         if (!this.connected) {
@@ -971,21 +1027,36 @@ export class StreamInput {
             return
         }
 
-        if (this.gamepads.find(value => value?.gamepadIndex == gamepad.index)) {
+        const existingId = this.gamepads.findIndex(value => value?.gamepadIndex == gamepad.index)
+        if (existingId != -1 && this.gamepads[existingId]!.visible) {
             return
         }
 
-        let id = -1
-        for (let i = 0; i < this.gamepads.length; i++) {
-            if (this.gamepads[i] == null) {
-                this.gamepads[i] = { gamepadIndex: gamepad.index, oldState: emptyGamepadState() }
-                id = i
-                break
+        let id = existingId
+        let hostSlotAlreadyExists = id != -1
+        if (id == -1) {
+            id = this.reusableGamepadSlot(gamepad)
+            hostSlotAlreadyExists = id != -1
+
+            if (id == -1) {
+                for (let i = 0; i < this.gamepads.length; i++) {
+                    if (this.gamepads[i] == null) {
+                        id = i
+                        break
+                    }
+                }
             }
         }
         if (id == -1) {
             id = this.gamepads.length
-            this.gamepads.push({ gamepadIndex: gamepad.index, oldState: emptyGamepadState() })
+            this.gamepads.push(null)
+        }
+
+        this.gamepads[id] = {
+            gamepadIndex: gamepad.index,
+            gamepadId: gamepad.id,
+            oldState: emptyGamepadState(),
+            visible: true,
         }
 
         // Start Rumble interval
@@ -1000,7 +1071,10 @@ export class StreamInput {
         const capabilities = this.controllerCapabilities(gamepad)
 
         if (this.config.controllerConfig.multiControllerMode == "auto") {
-            if (id == 0 && this.placeholderControllerAdvertised) {
+            if (hostSlotAlreadyExists) {
+                // The persisted host slot is already connected. Reusing it
+                // must not emit another ControllerConnect.
+            } else if (id == 0 && this.placeholderControllerAdvertised) {
                 // Slot 0 already exists on the host. Adopt it instead of
                 // sending a duplicate arrival when the browser finally
                 // reveals the real physical controller.
@@ -1085,11 +1159,7 @@ export class StreamInput {
     onGamepadDisconnect(event: GamepadEvent) {
         const index = this.gamepads.findIndex(value => value?.gamepadIndex == event.gamepad.index)
         if (index != -1) {
-            if (this.config.controllerConfig.multiControllerMode == "auto") {
-                this.sendControllerRemove(index)
-            }
-
-            this.gamepads[index] = null
+            this.markGamepadUnavailable(index)
         }
     }
 

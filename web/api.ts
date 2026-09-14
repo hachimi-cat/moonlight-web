@@ -443,9 +443,14 @@ export async function apiGetAppImage(api: Api, query: GetAppImageQuery): Promise
     return await response.blob()
 }
 
-export async function apiHostCancel(api: Api, request: PostCancelRequest): Promise<PostCancelResponse> {
+export async function apiHostCancel(
+    api: Api,
+    request: PostCancelRequest,
+    options?: { keepalive?: boolean },
+): Promise<PostCancelResponse> {
     const response = await fetchApi(api, "/host/cancel", POST, {
-        json: request
+        json: request,
+        keepalive: options?.keepalive,
     })
 
     return response as PostCancelResponse
@@ -496,15 +501,19 @@ export type WebRTCAnswer = {
 export async function apiWebRTCOffer(
     api: Api,
     offerSdp: string,
-    gamepads: { attached: number, persistAfterDisconnect: boolean },
+    stream: {
+        gamepads: { attached: number, persistAfterDisconnect: boolean },
+        resumeCurrentApp: boolean,
+    },
 ): Promise<WebRTCAnswer> {
     const ENDPOINT = "/host/stream/webrtc"
 
     const [url, request] = buildRequest(api, ENDPOINT, POST, {
         sdp: offerSdp,
         query: {
-            gamepads_attached: gamepads.attached,
-            gamepads_persist_after_disconnect: gamepads.persistAfterDisconnect,
+            gamepads_attached: stream.gamepads.attached,
+            gamepads_persist_after_disconnect: stream.gamepads.persistAfterDisconnect,
+            resume_current_app: stream.resumeCurrentApp,
         },
     })
 

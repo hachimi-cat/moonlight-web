@@ -1,6 +1,6 @@
 import "./polyfill/index"
 import "./styles/index"
-import { Api, apiGetHost, apiGetRole, getApi } from "./api"
+import { Api, apiGetHost, apiGetRole, apiHostCancel, getApi } from "./api"
 import { Component } from "./component/index"
 import { showNotification } from "./component/notification"
 import { getModalBackground, showMessage, showModal } from "./component/modal/index"
@@ -207,6 +207,7 @@ class ViewerApp implements Component {
 
     private soundGateShown: boolean = false
     private controllerGateShown: boolean = false
+    private pageExitHandled: boolean = false
 
     private toggleFullscreenWithKeybind: boolean = false
 
@@ -284,11 +285,25 @@ class ViewerApp implements Component {
             }
         })
 
-        // When the page gets destroyed
-        window.addEventListener("beforeunload", async () => {
-            // Stop the current stream
-            await this.stream.stop()
-        })
+        // A Pawpado stream tab owns the app it launched. Dropping only the
+        // browser transport leaves Apollo's app and virtual display alive,
+        // so reopening the same game with a new quality resumes the old
+        // resolution. `pagehide` covers tab close and mobile navigation;
+        // `beforeunload` is a desktop fallback. Both requests use keepalive
+        // because unload handlers cannot be awaited by the browser.
+        const stopOnPageExit = () => {
+            if (this.pageExitHandled) return
+            this.pageExitHandled = true
+
+            void this.stream.stop().catch(() => { })
+            void apiHostCancel(
+                this.api,
+                { host_id: this.hostId },
+                { keepalive: true },
+            ).catch(() => { })
+        }
+        window.addEventListener("pagehide", stopOnPageExit)
+        window.addEventListener("beforeunload", stopOnPageExit)
 
         document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
         document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))

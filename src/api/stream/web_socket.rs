@@ -140,7 +140,7 @@ async fn handle_ws(
 
     // -- Get Apps
     let app_id = AppId(stream_request.app_id);
-    stop_conflicting_app(&host, app_id).await?;
+    stop_conflicting_app(&host, app_id, stream_request.resume_current_app).await?;
     let apps = host.app_list().await?;
     let app_title = apps
         .into_iter()
