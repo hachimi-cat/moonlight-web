@@ -222,9 +222,17 @@ export class WebRTCTransport implements Transport {
     }
 
     private onTrack(event: RTCTrackEvent) {
-        event.receiver.jitterBufferTarget = 0
+        // Pawpado can request a tiny playout cushion. Its diagnostics showed
+        // clean direct UDP and zero packet loss while a forced zero buffer
+        // still ran out of frames, producing visible 33–50 ms cadence gaps.
+        // Keep upstream's latency-first zero default for every other caller.
+        const requestedBufferMs = Number(new URLSearchParams(location.search).get("pawpadoJitterBufferMs"))
+        const jitterBufferMs = Number.isFinite(requestedBufferMs)
+            ? Math.max(0, Math.min(200, requestedBufferMs))
+            : 0
+        event.receiver.jitterBufferTarget = jitterBufferMs
         if ("playoutDelayHint" in event.receiver) {
-            event.receiver.playoutDelayHint = 0
+            event.receiver.playoutDelayHint = jitterBufferMs / 1000
         }
         const track = event.track
 

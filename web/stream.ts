@@ -30,85 +30,15 @@ function visibleGamepad(): Gamepad | null {
     }
 }
 
-/**
- * Chrome deliberately hides a controller from each new Navigator until the
- * player uses it in that document.  A controller seen by the Pawpado portal
- * can therefore still be invisible in the newly-opened stream tab.  Gate the
- * GAME launch here, in the document that will actually read the pad, so the
- * first button press reaches the client before Apollo starts the game.
- */
-async function waitForControllerBeforeLaunch(root: HTMLElement, queryParams: URLSearchParams): Promise<void> {
-    if (queryParams.get("pawpadoController") != "1" || visibleGamepad()) {
-        return
+function activeGamepad(): Gamepad | null {
+    try {
+        return Array.from(navigator.getGamepads()).find(gamepad => gamepad != null && (
+            gamepad.buttons.some(button => button.pressed || button.value > 0.05) ||
+            gamepad.axes.some(axis => Math.abs(axis) > 0.12)
+        )) ?? null
+    } catch {
+        return null
     }
-
-    const overlay = document.createElement("section")
-    overlay.setAttribute("role", "dialog")
-    overlay.setAttribute("aria-modal", "true")
-    overlay.setAttribute("aria-labelledby", "controller-gate-title")
-    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;box-sizing:border-box;padding:24px;background:#100d0c;color:#f7f3ef;font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
-
-    const card = document.createElement("div")
-    card.style.cssText = "width:min(440px,100%);box-sizing:border-box;border:1px solid rgba(255,255,255,.14);border-radius:18px;background:#1b1614;padding:26px;box-shadow:0 24px 80px rgba(0,0,0,.55)"
-
-    const eyebrow = document.createElement("p")
-    eyebrow.textContent = "Controller check"
-    eyebrow.style.cssText = "margin:0 0 8px;color:#d9a67b;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase"
-
-    const title = document.createElement("h1")
-    title.id = "controller-gate-title"
-    title.textContent = "Press any controller button"
-    title.style.cssText = "margin:0;font-size:24px;line-height:1.2"
-
-    const copy = document.createElement("p")
-    copy.textContent = "Your game will open as soon as this tab can read your controller."
-    copy.style.cssText = "margin:10px 0 0;color:#c9bdb4"
-
-    const status = document.createElement("p")
-    status.setAttribute("role", "status")
-    status.setAttribute("aria-live", "polite")
-    status.textContent = "Waiting for controller input…"
-    status.style.cssText = "margin:18px 0 0;color:#f1c7a2;font-weight:650"
-
-    const help = document.createElement("div")
-    help.hidden = true
-    help.style.cssText = "margin-top:18px;border-radius:12px;background:#120f0e;padding:14px;color:#c9bdb4;font-size:13px"
-    help.innerHTML = "<strong style=\"display:block;color:#f7f3ef;margin-bottom:6px\">Still not detected in Windows Chrome?</strong>Open <code style=\"user-select:all;color:#f1c7a2\">chrome://flags/#enable-windows-gameinput-data-fetcher</code>, set <strong>Enable GameInput data fetcher</strong> to Enabled, completely relaunch Chrome, and connect the controller before Chrome opens."
-
-    const skip = document.createElement("button")
-    skip.type = "button"
-    skip.textContent = "Continue without controller"
-    skip.style.cssText = "margin-top:20px;width:100%;min-height:46px;border:1px solid rgba(255,255,255,.18);border-radius:11px;background:transparent;color:#f7f3ef;font:inherit;font-weight:650;cursor:pointer;touch-action:manipulation"
-
-    card.append(eyebrow, title, copy, status, help, skip)
-    overlay.appendChild(card)
-    root.appendChild(overlay)
-
-    await new Promise<void>(resolve => {
-        let settled = false
-        const finish = () => {
-            if (settled) return
-            settled = true
-            clearInterval(poll)
-            clearTimeout(helpTimer)
-            window.removeEventListener("gamepadconnected", onConnected)
-            overlay.remove()
-            resolve()
-        }
-        const onConnected = () => finish()
-        const poll = window.setInterval(() => {
-            if (visibleGamepad()) finish()
-        }, 100)
-        const helpTimer = window.setTimeout(() => {
-            status.textContent = "No controller input detected yet."
-            if (/Windows/i.test(navigator.userAgent) && /Chrome\//i.test(navigator.userAgent)) {
-                help.hidden = false
-            }
-        }, 8000)
-
-        window.addEventListener("gamepadconnected", onConnected)
-        skip.addEventListener("click", finish, { once: true })
-    })
 }
 
 function isIOSWebKit(): boolean {
@@ -162,10 +92,6 @@ async function startApp() {
 
     // Wait for uniffi to finish it's initialization
     await uniffiInit
-
-    // This must run after the query and root checks but before ViewerApp's
-    // Stream constructor. Creating Stream is what sends the launch request.
-    await waitForControllerBeforeLaunch(rootElement, queryParams)
 
     // Set Uniffy Logger
     class CustomUniffiLogger implements UniffiLogger {
@@ -280,6 +206,7 @@ class ViewerApp implements Component {
     private manualFullscreenExitRequested: boolean = false
 
     private soundGateShown: boolean = false
+    private controllerGateShown: boolean = false
 
     private toggleFullscreenWithKeybind: boolean = false
 
@@ -435,6 +362,7 @@ class ViewerApp implements Component {
             this.sidebar.onCapabilitiesChange(data.capabilities)
 
             this.armFullscreenOnNextInteraction()
+            await this.showControllerLaunchGate()
             this.showIOSSoundGate()
         } else if (data.type == "streamEnded") {
             // Quit-the-game closes the tab, but ONLY when the embedder asked
@@ -455,6 +383,106 @@ class ViewerApp implements Component {
             // the frozen last frame.
             await showMessage(data.graceful ? I.stream.streamEnded : I.stream.connectionLost)
         }
+    }
+
+    /**
+     * Do not treat a merely enumerated Gamepad as proof that controller input
+     * reaches the host. The stream/control channel must be live first; then a
+     * real press is forwarded to Apollo's virtual XInput pad while its game
+     * launcher waits for the corresponding press and release.
+     */
+    private async showControllerLaunchGate(): Promise<void> {
+        if (
+            new URLSearchParams(window.location.search).get("pawpadoController") != "1" ||
+            this.controllerGateShown ||
+            !document.body
+        ) {
+            return
+        }
+        this.controllerGateShown = true
+
+        const overlay = document.createElement("section")
+        overlay.setAttribute("role", "dialog")
+        overlay.setAttribute("aria-modal", "true")
+        overlay.setAttribute("aria-labelledby", "controller-gate-title")
+        overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;box-sizing:border-box;padding:24px;background:rgba(16,13,12,.96);color:#f7f3ef;font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;touch-action:manipulation"
+
+        const card = document.createElement("div")
+        card.style.cssText = "width:min(440px,100%);box-sizing:border-box;border:1px solid rgba(255,255,255,.14);border-radius:18px;background:#1b1614;padding:26px;box-shadow:0 24px 80px rgba(0,0,0,.55)"
+        card.innerHTML = "<p style=\"margin:0 0 8px;color:#d9a67b;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase\">Controller check</p><h1 id=\"controller-gate-title\" style=\"margin:0;font-size:24px;line-height:1.2\">Press any controller button</h1><p style=\"margin:10px 0 0;color:#c9bdb4\">We will verify the input reaches your cloud computer before opening the game.</p>"
+
+        const status = document.createElement("p")
+        status.setAttribute("role", "status")
+        status.setAttribute("aria-live", "polite")
+        status.textContent = visibleGamepad()
+            ? "Controller found — waiting for a button press…"
+            : "Waiting for controller input…"
+        status.style.cssText = "margin:18px 0 0;color:#f1c7a2;font-weight:650"
+
+        const help = document.createElement("div")
+        help.hidden = true
+        help.style.cssText = "margin-top:18px;border-radius:12px;background:#120f0e;padding:14px;color:#c9bdb4;font-size:13px"
+        help.innerHTML = "<strong style=\"display:block;color:#f7f3ef;margin-bottom:6px\">Still not detected in Windows Chrome?</strong>Open <code style=\"user-select:all;color:#f1c7a2\">chrome://flags/#enable-windows-gameinput-data-fetcher</code>, set <strong>Enable GameInput data fetcher</strong> to Enabled, completely relaunch Chrome, and connect the controller before Chrome opens."
+
+        const skip = document.createElement("button")
+        skip.type = "button"
+        skip.textContent = "Continue without controller"
+        skip.style.cssText = "margin-top:20px;width:100%;min-height:46px;border:1px solid rgba(255,255,255,.18);border-radius:11px;background:transparent;color:#f7f3ef;font:inherit;font-weight:650;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent"
+
+        card.append(status, help, skip)
+        overlay.appendChild(card)
+        for (const name of ["pointerdown", "pointerup", "touchstart", "touchmove", "touchend", "click"]) {
+            overlay.addEventListener(name, event => event.stopPropagation(), { passive: name != "touchend" })
+        }
+        document.body.appendChild(overlay)
+        skip.focus()
+
+        await new Promise<void>(resolve => {
+            let settled = false
+            let activeSeen = false
+            const finish = () => {
+                if (settled) return
+                settled = true
+                clearInterval(poll)
+                clearTimeout(helpTimer)
+                window.removeEventListener("gamepadconnected", onConnected)
+                overlay.remove()
+                resolve()
+            }
+            const onConnected = () => {
+                status.textContent = "Controller found — press any button…"
+            }
+            const poll = window.setInterval(() => {
+                if (activeGamepad()) {
+                    activeSeen = true
+                    status.textContent = "Controller confirmed — release the button to start…"
+                    return
+                }
+                if (activeSeen) {
+                    finish()
+                } else if (visibleGamepad()) {
+                    status.textContent = "Controller found — waiting for a button press…"
+                }
+            }, 50)
+            const helpTimer = window.setTimeout(() => {
+                if (!activeSeen) {
+                    status.textContent = "No controller button press detected yet."
+                    if (/Windows/i.test(navigator.userAgent) && /Chrome\//i.test(navigator.userAgent)) {
+                        help.hidden = false
+                    }
+                }
+            }, 8000)
+
+            window.addEventListener("gamepadconnected", onConnected)
+            skip.addEventListener("click", () => {
+                // Validate the same browser-to-host input path without
+                // leaking a button into the game: the host waits for this
+                // synthetic press AND release before it starts the EXE.
+                this.stream.getInput().pulseControllerForLaunch()
+                status.textContent = "Starting without controller…"
+                window.setTimeout(finish, 180)
+            }, { once: true })
+        })
     }
 
     private async shouldAutoClose(graceful: boolean): Promise<boolean> {

@@ -1289,6 +1289,19 @@ export class StreamInput {
             controllerNumber: id,
         }))
     }
+    /**
+     * Release a host-side game launcher that is intentionally waiting for an
+     * end-to-end controller event. The game is still stopped while both
+     * packets are sent, so this cannot become an in-game A press.
+     */
+    pulseControllerForLaunch() {
+        if (!this.connected) return
+
+        const pressed = emptyGamepadState()
+        pressed.buttonFlags.a = true
+        this.sendController(0, pressed)
+        window.setTimeout(() => this.sendController(0, emptyGamepadState()), 120)
+    }
     // Values
     // - Trigger: range 0..1
     // - Stick: range -1..1
