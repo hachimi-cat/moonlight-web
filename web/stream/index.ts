@@ -242,6 +242,29 @@ export class Stream implements Component {
             return this.startConnection()
         }
 
+        // `auto` used to fall back to WebSocket only when WebRTC could not
+        // establish its first connection. A direct UDP path can connect and
+        // then become unusable, though: the media watchdog reports that as a
+        // degraded/stalled shutdown. After the bounded lower-bitrate retries
+        // are exhausted, keep the host app alive and move the resumed stream
+        // to WebSocket instead of presenting a terminal connection-lost
+        // screen. Explicit `webrtc` mode remains WebRTC-only as requested.
+        if ((shutdown == "degraded" || shutdown == "stalled")
+            && desiredTransport == "auto"
+            && this.permissions.allow_transport_websockets
+        ) {
+            this.transportOverride = "websocket"
+            this.serverTerminationGraceful = false
+            this.debugLog(
+                `WebRTC media remained ${shutdown} after ${this.mediaRecoveryAttempts} ` +
+                `recovery attempts; falling back to Web Socket transport at ` +
+                `${this.settings.bitrate} Kbps`,
+                { type: "ifErrorDescription" },
+            )
+            await wait(FALLBACK_RECONNECT_DELAY_MS)
+            return this.startConnection()
+        }
+
         if (shutdown == "disconnect" || shutdown == "failed"
             || shutdown == "degraded" || shutdown == "stalled"
         ) {
