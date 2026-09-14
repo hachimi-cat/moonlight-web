@@ -65,6 +65,7 @@ impl AudioChannel {
         spawn(
             async move {
                 let mut sequence_number = 0u16;
+                let mut binding_was_paused = false;
 
                 while let Some(frame) = frame_receiver.recv().await {
                     // 48kHz clock; micros keep 5ms Opus frames from being
@@ -72,9 +73,20 @@ impl AudioChannel {
                     let timestamp = (frame.timestamp.as_micros() * 48 / 1000) as u32;
 
                     if track.all_binding_paused().await {
-                        trace!("audio track all binding paused");
-                        // Don't send any packets when the track is paused because we don't want to increment the sequence number
-                        return;
+                        if !binding_was_paused {
+                            tracing::debug!(
+                                "audio track bindings paused; dropping frames until they resume"
+                            );
+                            binding_was_paused = true;
+                        }
+                        // Keep the relay task alive across a transient WebRTC pause.
+                        // Returning here left ICE/control connected while audio (and,
+                        // when both bindings paused, video) stayed dead forever.
+                        continue;
+                    }
+                    if binding_was_paused {
+                        tracing::debug!("audio track bindings resumed");
+                        binding_was_paused = false;
                     }
 
                     trace!(len = ?frame.buffer.len(), timestamp = ?frame.timestamp, "audio frame");

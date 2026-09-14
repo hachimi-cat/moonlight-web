@@ -117,6 +117,9 @@ function isFirefox(): boolean {
 
 const WEBRTC_CONNECT_TIMEOUT_MS = 15000
 const FALLBACK_RECONNECT_DELAY_MS = 500
+const MEDIA_RECOVERY_MAX_ATTEMPTS = 2
+const MEDIA_RECOVERY_BITRATE_FACTOR = 0.65
+const MEDIA_RECOVERY_MIN_BITRATE_KBPS = 3000
 
 export class Stream implements Component {
     private logger: Logger = new Logger()
@@ -133,6 +136,7 @@ export class Stream implements Component {
     private eventTarget = new EventTarget()
 
     private transportOverride: TransportType | null = null
+    private mediaRecoveryAttempts = 0
 
     private videoRenderer: VideoRenderer | null = null
     private audioPlayer: AudioPlayer | null = null
@@ -184,7 +188,7 @@ export class Stream implements Component {
         }
     }
 
-    async startConnection() {
+    async startConnection(): Promise<void> {
         this.debugLog(`Permissions: ${JSON.stringify(this.permissions)}`)
 
         const desiredTransport = this.transportOverride ?? this.settings.dataTransport
@@ -219,7 +223,28 @@ export class Stream implements Component {
         // `graceful` permanently false and the auto-close branch downstream
         // unreachable — the tab never closed and every clean quit was
         // reported to the player as a lost connection.
-        if (shutdown == "disconnect" || shutdown == "failed") {
+        if ((shutdown == "degraded" || shutdown == "stalled")
+            && this.mediaRecoveryAttempts < MEDIA_RECOVERY_MAX_ATTEMPTS
+        ) {
+            this.mediaRecoveryAttempts += 1
+            const oldBitrate = this.settings.bitrate
+            this.settings.bitrate = Math.max(
+                MEDIA_RECOVERY_MIN_BITRATE_KBPS,
+                Math.round(oldBitrate * MEDIA_RECOVERY_BITRATE_FACTOR / 500) * 500,
+            )
+            this.serverTerminationGraceful = false
+            this.debugLog(
+                `Media ${shutdown}; reconnecting at ${this.settings.bitrate} Kbps ` +
+                `(attempt ${this.mediaRecoveryAttempts}/${MEDIA_RECOVERY_MAX_ATTEMPTS})`,
+                { type: "ifErrorDescription" },
+            )
+            await wait(FALLBACK_RECONNECT_DELAY_MS)
+            return this.startConnection()
+        }
+
+        if (shutdown == "disconnect" || shutdown == "failed"
+            || shutdown == "degraded" || shutdown == "stalled"
+        ) {
             this.dispatchStreamEnded(shutdown == "disconnect" || this.serverTerminationGraceful)
             return
         }

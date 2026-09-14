@@ -12,7 +12,7 @@ use tokio::{
     select, spawn,
     sync::mpsc::{UnboundedSender, unbounded_channel},
 };
-use tracing::{Instrument, debug, debug_span, info, trace, warn};
+use tracing::{Instrument, debug, debug_span, info, warn};
 use webrtc::{
     api::media_engine::{MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_HEVC},
     peer_connection::RTCPeerConnection,
@@ -117,6 +117,7 @@ impl VideoChannel {
         spawn(
             async move {
                 let mut sequence_number = 0u16;
+                let mut binding_was_paused = false;
 
                 while let Some(frame) = frame_receiver.recv().await {
                     let frame = frame.as_ref();
@@ -129,9 +130,22 @@ impl VideoChannel {
                         / 1_000_000) as u32;
 
                     if track.all_binding_paused().await {
-                        trace!("video track all binding paused");
-                        // Don't send any packets when the track is paused because we don't want to increment the sequence number
-                        return;
+                        if !binding_was_paused {
+                            debug!(
+                                "video track bindings paused; dropping frames until they resume"
+                            );
+                            binding_was_paused = true;
+                        }
+                        // A binding can be paused transiently while the peer remains
+                        // alive. Ending this task here made that pause permanent: the
+                        // control/ICE connection stayed connected but no video packet
+                        // could ever be sent again. Drop frames without advancing the
+                        // RTP sequence number, then check again on the next frame.
+                        continue;
+                    }
+                    if binding_was_paused {
+                        debug!("video track bindings resumed");
+                        binding_was_paused = false;
                     }
 
                     let mut payloads = Vec::with_capacity(10);

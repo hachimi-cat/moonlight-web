@@ -23,6 +23,27 @@ export class WebRTCTransport implements Transport {
     private peer: RTCPeerConnection
     private location: string | null = null
 
+    /**
+     * A WebRTC peer can remain `connected` after its media path has stopped.
+     * The data channel and ICE consent checks still succeed in that state,
+     * so connectionstatechange never gives the viewer a chance to recover.
+     * Watch cumulative RTP counters and deliberately renegotiate instead of
+     * leaving a frozen last frame on screen forever.
+     */
+    private mediaWatchdogTimer: number | null = null
+    private mediaReceived = false
+    private lastMediaPacketCount: number | null = null
+    private lastMediaProgressAt = 0
+    private lastVideoReceived: number | null = null
+    private lastVideoLost: number | null = null
+    private shutdownSignaled = false
+    private mediaWatchdogRunning = false
+
+    private static readonly MEDIA_WATCHDOG_INTERVAL_MS = 2000
+    private static readonly MEDIA_STALL_MS = 8000
+    private static readonly SEVERE_LOSS_RATIO = 0.12
+    private static readonly SEVERE_LOSS_MIN_PACKETS = 100
+
     constructor(api: Api, configuration: RTCConfiguration, logger?: Logger) {
         this.logger = logger
 
@@ -144,6 +165,7 @@ export class WebRTCTransport implements Transport {
     private onStateChange() {
         if (this.peer.connectionState == "connected") {
             this.wasConnected = true
+            this.startMediaWatchdog()
 
             this.generateConnectData().then(connectData => {
                 if (this.onconnect) {
@@ -151,12 +173,136 @@ export class WebRTCTransport implements Transport {
                 }
             })
         } else if (this.peer.connectionState == "failed" || this.peer.connectionState == "closed") {
+            this.stopMediaWatchdog()
             const shutdown = this.wasConnected ? "failed" : "failednoconnect"
 
-            if (this.onclose) {
-                this.onclose(shutdown)
-            }
+            this.signalShutdown(shutdown)
         }
+    }
+
+    private signalShutdown(shutdown: TransportShutdown) {
+        if (this.shutdownSignaled) {
+            return
+        }
+        this.shutdownSignaled = true
+        this.onclose?.(shutdown)
+    }
+
+    private startMediaWatchdog() {
+        if (this.mediaWatchdogTimer != null) {
+            return
+        }
+        this.lastMediaProgressAt = Date.now()
+        this.mediaWatchdogTimer = globalObject().setInterval(
+            () => void this.checkMediaProgress(),
+            WebRTCTransport.MEDIA_WATCHDOG_INTERVAL_MS,
+        )
+    }
+
+    private stopMediaWatchdog() {
+        if (this.mediaWatchdogTimer != null) {
+            globalObject().clearInterval(this.mediaWatchdogTimer)
+            this.mediaWatchdogTimer = null
+        }
+    }
+
+    private async checkMediaProgress() {
+        if (this.mediaWatchdogRunning || this.shutdownSignaled || this.peer.connectionState != "connected") {
+            return
+        }
+        this.mediaWatchdogRunning = true
+        try {
+            const stats = await this.peer.getStats()
+            let mediaPacketCount = 0
+            let videoReceived: number | null = null
+            let videoLost: number | null = null
+
+            for (const [_key, value] of stats) {
+                if (value.type != "inbound-rtp") {
+                    continue
+                }
+                if (typeof value.packetsReceived == "number") {
+                    mediaPacketCount += value.packetsReceived
+                }
+                if (value.kind == "video") {
+                    videoReceived = typeof value.packetsReceived == "number" ? value.packetsReceived : null
+                    videoLost = typeof value.packetsLost == "number" ? value.packetsLost : null
+                }
+            }
+
+            const now = Date.now()
+            if (this.lastMediaPacketCount == null || mediaPacketCount > this.lastMediaPacketCount) {
+                if (mediaPacketCount > 0) {
+                    this.mediaReceived = true
+                }
+                this.lastMediaProgressAt = now
+            }
+
+            if (videoReceived != null && videoLost != null
+                && this.lastVideoReceived != null && this.lastVideoLost != null
+            ) {
+                const received = Math.max(0, videoReceived - this.lastVideoReceived)
+                const lost = Math.max(0, videoLost - this.lastVideoLost)
+                const total = received + lost
+                const lossRatio = lost / Math.max(1, total)
+                if (total >= WebRTCTransport.SEVERE_LOSS_MIN_PACKETS
+                    && lossRatio >= WebRTCTransport.SEVERE_LOSS_RATIO
+                ) {
+                    this.logger?.debug(
+                        `WebRTC media degraded (${(lossRatio * 100).toFixed(1)}% video packet loss); reconnecting`,
+                    )
+                    await this.closeForRecovery("degraded")
+                    return
+                }
+            }
+
+            this.lastMediaPacketCount = mediaPacketCount
+            this.lastVideoReceived = videoReceived
+            this.lastVideoLost = videoLost
+
+            // Timers are throttled in background tabs. Only declare a stall
+            // while visible; when the tab returns, the next progressing
+            // sample refreshes the clock without disrupting the session.
+            if (this.mediaReceived && document.visibilityState == "visible"
+                && now - this.lastMediaProgressAt >= WebRTCTransport.MEDIA_STALL_MS
+            ) {
+                this.logger?.debug(
+                    `WebRTC media received no packets for ${WebRTCTransport.MEDIA_STALL_MS}ms; reconnecting`,
+                )
+                await this.closeForRecovery("stalled")
+            }
+        } catch (error) {
+            this.logger?.debug(`failed to sample WebRTC media health: ${error}`)
+        } finally {
+            this.mediaWatchdogRunning = false
+        }
+    }
+
+    private async closeForRecovery(reason: "degraded" | "stalled") {
+        if (this.shutdownSignaled) {
+            return
+        }
+
+        // Suppress connectionstatechange while deliberately closing. Wait
+        // for the server-side Moonlight stream to be deleted before asking
+        // it to resume the same app, otherwise the two negotiations race.
+        this.shutdownSignaled = true
+        this.stopMediaWatchdog()
+        this.peer.close()
+        const location = this.location
+        this.location = null
+        try {
+            if (location) {
+                await fetchApi(this.api, location, "DELETE", {
+                    keepalive: true,
+                    noUrlModify: true,
+                    response: "ignore",
+                })
+            }
+        } catch (error) {
+            this.logger?.debug(`failed to close stalled WebRTC transport: ${error}`)
+        }
+        this.onclose?.(reason)
     }
 
     // -- Trickle Ice
@@ -286,12 +432,16 @@ export class WebRTCTransport implements Transport {
     }
 
     async close(): Promise<void> {
+        this.stopMediaWatchdog()
+
         // Close the peer
         this.peer.close()
 
         // Delete our current session on the server
-        if (this.location) {
-            await fetchApi(this.api, this.location, "DELETE", {
+        const location = this.location
+        this.location = null
+        if (location) {
+            await fetchApi(this.api, location, "DELETE", {
                 keepalive: true,
                 noUrlModify: true,
                 response: "ignore",
