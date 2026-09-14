@@ -9,7 +9,7 @@ export const en = {
     },
     stream: {
         missingHostOrApp: "No Host or no App Id found",
-        fullscreenUnsupported: "Fullscreen is not supported by your browser!",
+        fullscreenUnsupported: "Interactive fullscreen isn't available here. On iPhone, add Pawpado to your Home Screen for an app-like fullscreen view.",
         fullscreenEscapeHint: "To exit Fullscreen you'll have to hold ESC for a few seconds.",
         pointerLockUnsupported: "Pointer Lock not supported",
         connecting: "Connecting",

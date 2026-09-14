@@ -263,6 +263,7 @@ class ViewerApp implements Component {
 
         document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
         document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
+        document.addEventListener("webkitfullscreenchange", this.onFullscreenChange.bind(this))
 
         window.addEventListener("gamepadconnected", this.onGamepadConnect.bind(this))
         window.addEventListener("gamepaddisconnected", this.onGamepadDisconnect.bind(this))
@@ -655,9 +656,17 @@ class ViewerApp implements Component {
 
     // Fullscreen
     async requestFullscreen(showEscapeWarning: boolean = true) {
-        const body = document.body
-        if (body) {
-            if (!("requestFullscreen" in body && typeof body.requestFullscreen == "function")) {
+        const target = (document.body ?? document.documentElement) as HTMLElement & {
+            webkitRequestFullscreen?: () => Promise<void> | void
+        }
+        if (target) {
+            const standardRequest = typeof target.requestFullscreen == "function"
+                ? target.requestFullscreen.bind(target)
+                : null
+            const webkitRequest = typeof target.webkitRequestFullscreen == "function"
+                ? target.webkitRequestFullscreen.bind(target)
+                : null
+            if (!standardRequest && !webkitRequest) {
                 await showMessage(I.stream.fullscreenUnsupported)
 
                 return
@@ -667,9 +676,11 @@ class ViewerApp implements Component {
 
             if (!this.isFullscreen()) {
                 try {
-                    await body.requestFullscreen({
-                        navigationUI: "hide"
-                    })
+                    if (standardRequest) {
+                        await standardRequest({ navigationUI: "hide" })
+                    } else {
+                        await webkitRequest!()
+                    }
                 } catch (e) {
                     console.warn("failed to request fullscreen", e)
                 }
@@ -709,12 +720,20 @@ class ViewerApp implements Component {
             await navigator.keyboard.unlock()
         }
 
-        if ("exitFullscreen" in document && typeof document.exitFullscreen == "function") {
+        const webkitDocument = document as Document & {
+            webkitExitFullscreen?: () => Promise<void> | void
+        }
+        if (typeof document.exitFullscreen == "function") {
             await document.exitFullscreen()
+        } else if (typeof webkitDocument.webkitExitFullscreen == "function") {
+            await webkitDocument.webkitExitFullscreen()
         }
     }
     isFullscreen(): boolean {
-        return "fullscreenElement" in document && !!document.fullscreenElement
+        const webkitDocument = document as Document & {
+            webkitFullscreenElement?: Element | null
+        }
+        return !!(document.fullscreenElement ?? webkitDocument.webkitFullscreenElement)
     }
     private async onFullscreenChange() {
         if (this.isFullscreen()) {
@@ -802,8 +821,7 @@ class ViewerApp implements Component {
 
     // -- Fully immersed Fullscreen -> Fullscreen API + Pointer Lock
     private checkFullyImmersed() {
-        if ("pointerLockElement" in document && document.pointerLockElement &&
-            "fullscreenElement" in document && document.fullscreenElement) {
+        if ("pointerLockElement" in document && document.pointerLockElement && this.isFullscreen()) {
             // We're fully immersed -> remove sidebar
             setSidebar(null)
         } else {

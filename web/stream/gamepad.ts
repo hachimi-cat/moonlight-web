@@ -121,6 +121,17 @@ export function isNintendoLayout(gamepad: Gamepad): boolean {
     return NINTENDO_LAYOUT_ID.test(gamepad.id)
 }
 
+/**
+ * Some Windows Bluetooth HID drivers expose an Xbox-compatible pad with an
+ * empty `mapping` even though its buttons and axes use the standard layout.
+ * Ignoring every non-"standard" pad made those controllers connect in Chrome
+ * but send no state at all. The shape check keeps the positional fallback
+ * narrow: two sticks, two triggers, shoulders, menu buttons and a d-pad.
+ */
+export function hasReadableStandardShape(gamepad: Gamepad): boolean {
+    return gamepad.mapping == "standard" || (gamepad.buttons.length >= 16 && gamepad.axes.length >= 4)
+}
+
 // The invert toggles are applied relative to the pad's detected layout —
 // an XOR, not an override. OFF therefore means "buttons do what their
 // labels say" on every pad, which is the default players expect, and a
@@ -175,13 +186,13 @@ export function extractGamepadState(gamepad: Gamepad, config: ControllerConfig):
         }
     }
 
-    state.leftTrigger = gamepad.buttons[6].value
-    state.rightTrigger = gamepad.buttons[7].value
+    state.leftTrigger = gamepad.buttons[6]?.value ?? 0
+    state.rightTrigger = gamepad.buttons[7]?.value ?? 0
 
-    state.leftStickX = gamepad.axes[0]
-    state.leftStickY = gamepad.axes[1]
-    state.rightStickX = gamepad.axes[2]
-    state.rightStickY = gamepad.axes[3]
+    state.leftStickX = gamepad.axes[0] ?? 0
+    state.leftStickY = gamepad.axes[1] ?? 0
+    state.rightStickX = gamepad.axes[2] ?? 0
+    state.rightStickY = gamepad.axes[3] ?? 0
 
     return state
 }

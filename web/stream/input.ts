@@ -1,6 +1,6 @@
 import { ClientInputEvent, ControllerButtons, ControllerCapabilities, ControllerType, KeyAction, KeyModifiers, MouseButton, MouseButtonAction, TouchEventType } from "../uniffi/moonlight_common_bindings"
 import { U16_MAX } from "./buffer"
-import { areGamepadStatesEqual, ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, mergeGamepadStates, SUPPORTED_BUTTONS } from "./gamepad"
+import { areGamepadStatesEqual, ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, hasReadableStandardShape, mergeGamepadStates, SUPPORTED_BUTTONS } from "./gamepad"
 import { StreamCapabilities } from "./index"
 import { convertToKey, convertToModifiers, emptyKeyModifiers } from "./keyboard"
 import { convertToButton } from "./mouse"
@@ -917,6 +917,37 @@ export class StreamInput {
         }
     }
 
+    /**
+     * `gamepadconnected` is intentionally gated on a gamepad gesture and can
+     * be missed while a stream page is booting. Polling is cheap (the browser
+     * already snapshots this array) and makes Bluetooth reconnects reliable
+     * without asking the player to reload the stream tab.
+     */
+    private syncVisibleGamepads() {
+        const visible = navigator.getGamepads()
+
+        for (const gamepad of visible) {
+            if (gamepad == null) continue
+            const known = this.gamepads.some(entry => entry?.gamepadIndex == gamepad.index)
+            if (!known && !this.bufferedControllers.includes(gamepad.index)) {
+                this.onGamepadConnect(gamepad)
+            }
+        }
+
+        // Browsers normally send `gamepaddisconnected`, but reconcile a
+        // missed event too so reconnecting at the same API index is not
+        // mistaken for the stale controller.
+        for (let id = 0; id < this.gamepads.length; id++) {
+            const entry = this.gamepads[id]
+            if (entry != null && visible[entry.gamepadIndex] == null) {
+                if (this.connected && this.config.controllerConfig.multiControllerMode == "auto") {
+                    this.sendControllerRemove(id)
+                }
+                this.gamepads[id] = null
+            }
+        }
+    }
+
     private collectActuators(gamepad: Gamepad): Array<GamepadHapticActuator> {
         const actuators = []
         if ("vibrationActuator" in gamepad && gamepad.vibrationActuator) {
@@ -979,8 +1010,21 @@ export class StreamInput {
             }
         }
 
-        if (gamepad.mapping != "standard") {
-            console.warn(`[Gamepad]: Unable to read values of gamepad with mapping ${gamepad.mapping}`)
+        if (!hasReadableStandardShape(gamepad)) {
+            console.warn(`[Gamepad]: Unable to read ${gamepad.id}; mapping=${gamepad.mapping}, buttons=${gamepad.buttons.length}, axes=${gamepad.axes.length}`)
+        } else {
+            if (gamepad.mapping != "standard") {
+                console.info(`[Gamepad]: Using Xbox-compatible positional fallback for ${gamepad.id}`)
+            }
+            // Send the event-time snapshot immediately. A browser may expose
+            // a Bluetooth pad on its first short button press and release it
+            // before the next animation frame; waiting would lose that first
+            // state and make the connection look dead.
+            const state = extractGamepadState(gamepad, this.config.controllerConfig)
+            this.gamepads[id]!.oldState = state
+            if (this.config.controllerConfig.multiControllerMode == "auto") {
+                this.sendController(id, state)
+            }
         }
     }
 
@@ -1051,6 +1095,8 @@ export class StreamInput {
 
     private lastGamepadUpdate: number = performance.now()
     onGamepadUpdate() {
+        this.syncVisibleGamepads()
+
         if (this.config.controllerConfig.sendIntervalOverride != null) {
             const now = performance.now()
             if (now - this.lastGamepadUpdate < (1000 / this.config.controllerConfig.sendIntervalOverride)) {
@@ -1064,7 +1110,7 @@ export class StreamInput {
             for (const entry of this.gamepads) {
                 if (!entry) continue
                 const gamepad = navigator.getGamepads()[entry.gamepadIndex]
-                if (gamepad?.mapping == "standard") {
+                if (gamepad && hasReadableStandardShape(gamepad)) {
                     states.push(extractGamepadState(gamepad, this.config.controllerConfig))
                 }
             }
@@ -1087,7 +1133,7 @@ export class StreamInput {
                 continue
             }
 
-            if (gamepad.mapping != "standard") {
+            if (!hasReadableStandardShape(gamepad)) {
                 continue
             }
 
