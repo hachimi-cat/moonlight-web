@@ -22,6 +22,101 @@ import { wait } from "./util"
 
 let I = getTranslations(getCurrentLanguage())
 
+function visibleGamepad(): Gamepad | null {
+    try {
+        return Array.from(navigator.getGamepads()).find(gamepad => gamepad != null) ?? null
+    } catch {
+        return null
+    }
+}
+
+/**
+ * Chrome deliberately hides a controller from each new Navigator until the
+ * player uses it in that document.  A controller seen by the Pawpado portal
+ * can therefore still be invisible in the newly-opened stream tab.  Gate the
+ * GAME launch here, in the document that will actually read the pad, so the
+ * first button press reaches the client before Apollo starts the game.
+ */
+async function waitForControllerBeforeLaunch(root: HTMLElement, queryParams: URLSearchParams): Promise<void> {
+    if (queryParams.get("pawpadoController") != "1" || visibleGamepad()) {
+        return
+    }
+
+    const overlay = document.createElement("section")
+    overlay.setAttribute("role", "dialog")
+    overlay.setAttribute("aria-modal", "true")
+    overlay.setAttribute("aria-labelledby", "controller-gate-title")
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;box-sizing:border-box;padding:24px;background:#100d0c;color:#f7f3ef;font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
+
+    const card = document.createElement("div")
+    card.style.cssText = "width:min(440px,100%);box-sizing:border-box;border:1px solid rgba(255,255,255,.14);border-radius:18px;background:#1b1614;padding:26px;box-shadow:0 24px 80px rgba(0,0,0,.55)"
+
+    const eyebrow = document.createElement("p")
+    eyebrow.textContent = "Controller check"
+    eyebrow.style.cssText = "margin:0 0 8px;color:#d9a67b;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase"
+
+    const title = document.createElement("h1")
+    title.id = "controller-gate-title"
+    title.textContent = "Press any controller button"
+    title.style.cssText = "margin:0;font-size:24px;line-height:1.2"
+
+    const copy = document.createElement("p")
+    copy.textContent = "Your game will open as soon as this tab can read your controller."
+    copy.style.cssText = "margin:10px 0 0;color:#c9bdb4"
+
+    const status = document.createElement("p")
+    status.setAttribute("role", "status")
+    status.setAttribute("aria-live", "polite")
+    status.textContent = "Waiting for controller input…"
+    status.style.cssText = "margin:18px 0 0;color:#f1c7a2;font-weight:650"
+
+    const help = document.createElement("div")
+    help.hidden = true
+    help.style.cssText = "margin-top:18px;border-radius:12px;background:#120f0e;padding:14px;color:#c9bdb4;font-size:13px"
+    help.innerHTML = "<strong style=\"display:block;color:#f7f3ef;margin-bottom:6px\">Still not detected in Windows Chrome?</strong>Open <code style=\"user-select:all;color:#f1c7a2\">chrome://flags/#enable-windows-gameinput-data-fetcher</code>, set <strong>Enable GameInput data fetcher</strong> to Enabled, completely relaunch Chrome, and connect the controller before Chrome opens."
+
+    const skip = document.createElement("button")
+    skip.type = "button"
+    skip.textContent = "Continue without controller"
+    skip.style.cssText = "margin-top:20px;width:100%;min-height:46px;border:1px solid rgba(255,255,255,.18);border-radius:11px;background:transparent;color:#f7f3ef;font:inherit;font-weight:650;cursor:pointer;touch-action:manipulation"
+
+    card.append(eyebrow, title, copy, status, help, skip)
+    overlay.appendChild(card)
+    root.appendChild(overlay)
+
+    await new Promise<void>(resolve => {
+        let settled = false
+        const finish = () => {
+            if (settled) return
+            settled = true
+            clearInterval(poll)
+            clearTimeout(helpTimer)
+            window.removeEventListener("gamepadconnected", onConnected)
+            overlay.remove()
+            resolve()
+        }
+        const onConnected = () => finish()
+        const poll = window.setInterval(() => {
+            if (visibleGamepad()) finish()
+        }, 100)
+        const helpTimer = window.setTimeout(() => {
+            status.textContent = "No controller input detected yet."
+            if (/Windows/i.test(navigator.userAgent) && /Chrome\//i.test(navigator.userAgent)) {
+                help.hidden = false
+            }
+        }, 8000)
+
+        window.addEventListener("gamepadconnected", onConnected)
+        skip.addEventListener("click", finish, { once: true })
+    })
+}
+
+function isIOSWebKit(): boolean {
+    const ua = navigator.userAgent
+    return /iPad|iPhone|iPod/i.test(ua) ||
+        (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1)
+}
+
 async function startApp() {
     const uniffiInit = uniffiInitAsync()
 
@@ -67,6 +162,11 @@ async function startApp() {
 
     // Wait for uniffi to finish it's initialization
     await uniffiInit
+
+    // This must run after the query and root checks but before ViewerApp's
+    // Stream constructor. Creating Stream is what sends the launch request.
+    await waitForControllerBeforeLaunch(rootElement, queryParams)
+
     // Set Uniffy Logger
     class CustomUniffiLogger implements UniffiLogger {
         log(level: LogLevel, message: string): void {
@@ -178,6 +278,8 @@ class ViewerApp implements Component {
     private pendingAutoFullscreenTouchGesture: boolean = false
     private pendingAutoFullscreenMouseGesture: boolean = false
     private manualFullscreenExitRequested: boolean = false
+
+    private soundGateShown: boolean = false
 
     private toggleFullscreenWithKeybind: boolean = false
 
@@ -333,6 +435,7 @@ class ViewerApp implements Component {
             this.sidebar.onCapabilitiesChange(data.capabilities)
 
             this.armFullscreenOnNextInteraction()
+            this.showIOSSoundGate()
         } else if (data.type == "streamEnded") {
             // Quit-the-game closes the tab, but ONLY when the embedder asked
             // for it (?autoclose=1). A ServerTermination packet is the best
@@ -403,10 +506,67 @@ class ViewerApp implements Component {
         this.stream.getAudioPlayer()?.onUserInteraction()
     }
 
+    /**
+     * iOS does not treat a hardware gamepad button as an autoplay gesture.
+     * Our Safari audio pipeline consequently remains suspended (and drops
+     * PCM before its first interaction) when somebody plays controller-only.
+     * Ask for one explicit tap after the audio player exists, then resume it
+     * synchronously inside that gesture.
+     */
+    private showIOSSoundGate() {
+        if (!isIOSWebKit() || this.soundGateShown || !document.body) return
+        this.soundGateShown = true
+
+        const overlay = document.createElement("section")
+        overlay.setAttribute("role", "dialog")
+        overlay.setAttribute("aria-modal", "true")
+        overlay.setAttribute("aria-labelledby", "sound-gate-title")
+        overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;box-sizing:border-box;padding:24px;background:rgba(16,13,12,.96);color:#f7f3ef;font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;touch-action:manipulation"
+
+        const button = document.createElement("button")
+        button.type = "button"
+        button.style.cssText = "width:min(420px,100%);box-sizing:border-box;border:1px solid rgba(255,255,255,.16);border-radius:18px;background:#1b1614;color:#f7f3ef;padding:28px 24px;box-shadow:0 24px 80px rgba(0,0,0,.55);font:inherit;text-align:center;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent"
+        button.innerHTML = "<strong id=\"sound-gate-title\" style=\"display:block;font-size:22px;line-height:1.25\">Tap to play with sound</strong><span style=\"display:block;margin-top:9px;color:#c9bdb4\">Safari needs one screen tap before it can play game audio.</span>"
+        overlay.appendChild(button)
+
+        let finished = false
+        const enter = (event: Event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            if (finished) return
+            finished = true
+            // Keep this synchronous: Safari only permits play()/resume()
+            // while the tap's transient activation is still live.
+            this.onUserInteraction()
+            overlay.remove()
+        }
+        // ViewerApp owns document-level touch handlers that intentionally
+        // prevent synthetic clicks. Consume the real touch here instead.
+        button.addEventListener("touchstart", event => event.stopPropagation(), { passive: true })
+        button.addEventListener("touchend", enter, { passive: false })
+        button.addEventListener("pointerup", enter)
+        button.addEventListener("click", enter)
+        document.body.appendChild(overlay)
+        button.focus()
+    }
+
     // -- Auto Fullscreen
     private armFullscreenOnNextInteraction() {
-        if (this.autoEnterFullscreenOnStart) {
+        // iPhone Safari exposes neither page-fullscreen entry point. Arming
+        // anyway consumed the tap before onUserInteraction could unlock
+        // Web Audio, showed the unsupported warning, then re-armed forever.
+        // Manual fullscreen can still explain the Home Screen alternative;
+        // the automatic path must never steal input it cannot use.
+        const target = (document.body ?? document.documentElement) as HTMLElement & {
+            webkitRequestFullscreen?: () => Promise<void> | void
+        }
+        const canRequest = Boolean(target) &&
+            (typeof target.requestFullscreen == "function" ||
+                typeof target.webkitRequestFullscreen == "function")
+        if (this.autoEnterFullscreenOnStart && canRequest) {
             this.fullscreenOnNextInteractionArmed = true
+        } else {
+            this.fullscreenOnNextInteractionArmed = false
         }
     }
     private consumeAutoFullscreenInteraction(): boolean {
