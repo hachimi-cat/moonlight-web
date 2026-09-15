@@ -474,7 +474,10 @@ class ViewerApp implements Component {
 
     private async waitForMatchingGameProcess(): Promise<void> {
         if (!this.launchOverlay) return
-        const deadline = Date.now() + 60_000
+        // The host now waits for a real top-level game window rather than
+        // declaring success at process spawn. Leave enough room for that
+        // bounded 45-second check plus stream/control-channel startup.
+        const deadline = Date.now() + 75_000
         let sawState = false
         while (Date.now() < deadline) {
             let terminalError: Error | null = null

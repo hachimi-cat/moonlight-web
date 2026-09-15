@@ -18,6 +18,52 @@ struct LaunchState {
     message: Option<String>,
 }
 
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    if pid == 0 {
+        return false;
+    }
+
+    // SAFETY: OpenProcess returns an owned kernel handle. We request only
+    // query access, pass GetExitCodeProcess a valid out pointer, and close the
+    // handle on every successful open.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0_u32;
+        let queried = GetExitCodeProcess(handle, &mut exit_code) != 0;
+        let _ = CloseHandle(handle);
+        queried && exit_code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(not(windows))]
+fn process_is_running(_pid: u32) -> bool {
+    // The endpoint is served from Windows in production. Non-Windows builds
+    // retain the state for local development; the normalization itself is
+    // covered below with an injected process checker.
+    true
+}
+
+fn normalize_running_state(state: &mut LaunchState, is_running: impl FnOnce(u32) -> bool) {
+    if state.state != "running" {
+        return;
+    }
+    let alive = state.pid.is_some_and(is_running);
+    if alive {
+        return;
+    }
+    state.state = "failed".into();
+    state.message = Some("The game process closed before its window was ready".into());
+}
+
 fn launch_state_path() -> PathBuf {
     if let Some(path) = std::env::var_os("PAWPADO_LAUNCH_STATE_PATH") {
         return PathBuf::from(path);
@@ -54,7 +100,7 @@ pub async fn get_launch_state(_user: AuthenticatedUser) -> HttpResponse {
         Err(_) => return HttpResponse::ServiceUnavailable().finish(),
     };
 
-    let Ok(state) = serde_json::from_slice::<LaunchState>(&contents) else {
+    let Ok(mut state) = serde_json::from_slice::<LaunchState>(&contents) else {
         // The launcher writes to a temporary file and renames it, so malformed
         // JSON means corruption rather than a normal partial-write race.
         return HttpResponse::ServiceUnavailable().finish();
@@ -62,6 +108,10 @@ pub async fn get_launch_state(_user: AuthenticatedUser) -> HttpResponse {
     if !valid_state(&state) {
         return HttpResponse::ServiceUnavailable().finish();
     }
+    // The launcher can itself be terminated while waiting on a game, leaving
+    // a last-written `running` record behind. Never let that stale file reveal
+    // the desktop: on Windows, the PID must still describe a live process.
+    normalize_running_state(&mut state, process_is_running);
 
     HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
@@ -89,5 +139,50 @@ mod tests {
         state.slug = "cuphead".into();
         state.state = "unknown".into();
         assert!(!valid_state(&state));
+    }
+
+    #[test]
+    fn dead_or_missing_running_pid_becomes_a_visible_failure() {
+        let mut state = LaunchState {
+            slug: "cuphead".into(),
+            title: "Cuphead".into(),
+            state: "running".into(),
+            updated_at: 1,
+            pid: Some(42),
+            message: Some("Game is running".into()),
+        };
+
+        normalize_running_state(&mut state, |_| false);
+        assert_eq!(state.state, "failed");
+        assert_eq!(
+            state.message.as_deref(),
+            Some("The game process closed before its window was ready")
+        );
+
+        state.state = "running".into();
+        state.pid = None;
+        normalize_running_state(&mut state, |_| true);
+        assert_eq!(state.state, "failed");
+    }
+
+    #[test]
+    fn live_running_pid_and_non_running_states_are_preserved() {
+        let mut state = LaunchState {
+            slug: "cuphead".into(),
+            title: "Cuphead".into(),
+            state: "running".into(),
+            updated_at: 1,
+            pid: Some(42),
+            message: Some("Game window is ready".into()),
+        };
+
+        normalize_running_state(&mut state, |pid| pid == 42);
+        assert_eq!(state.state, "running");
+        assert_eq!(state.message.as_deref(), Some("Game window is ready"));
+
+        state.state = "starting".into();
+        state.pid = None;
+        normalize_running_state(&mut state, |_| false);
+        assert_eq!(state.state, "starting");
     }
 }

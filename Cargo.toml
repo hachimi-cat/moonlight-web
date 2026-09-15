@@ -64,7 +64,11 @@ uuid = { version = "1.24.0" }
 hex = { version = "0.4.3" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
 
 [lints.clippy]
 too_many_arguments = "allow"
