@@ -348,7 +348,7 @@ export class Stream implements Component {
                 iceServers: config.iceServers,
             },
             this.logger,
-            !this.preserveControllerSession,
+            this.preserveControllerSession,
         )
         transport.controlStream.onreceive = this.boundReceivePacket
 

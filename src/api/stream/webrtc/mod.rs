@@ -35,9 +35,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{
     mpsc::{self},
-    watch,
+    oneshot, watch,
 };
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tokio::{select, spawn};
 use tracing::{Instrument, debug, debug_span, error, info, instrument, warn};
 use webrtc::api::APIBuilder;
@@ -48,6 +48,7 @@ use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -211,6 +212,29 @@ fn create_media_engine(video_formats: &HashMap<VideoFormat, RTCRtpCodecParameter
     }
 
     media_engine
+}
+
+/// Replace only the browser-facing ICE route while retaining the peer's
+/// media tracks, data channel, and the relay's Moonlight connection.
+///
+/// A full WHEP DELETE + POST disconnects Apollo and destroys its ViGEm
+/// target. Games that opened XInput slot 0 keep polling that dead object even
+/// when Apollo creates a replacement in slot 1. An ICE restart repairs the
+/// failed UDP path without crossing that controller lifecycle boundary.
+async fn restart_peer_ice(peer: &RTCPeerConnection, offer_sdp: String) -> Result<String, AppError> {
+    let offer = RTCSessionDescription::offer(offer_sdp)?;
+    peer.set_remote_description(offer).await?;
+
+    let mut ice_complete = peer.gathering_complete_promise().await;
+    let answer = peer.create_answer(None).await?;
+    peer.set_local_description(answer).await?;
+    let _ = timeout(Duration::from_secs(10), ice_complete.recv()).await;
+
+    let answer = peer
+        .local_description()
+        .await
+        .ok_or(AppError::StreamClosed)?;
+    Ok(answer.sdp)
 }
 
 #[post("")]
@@ -608,6 +632,13 @@ pub async fn webrtc_post(
                             }
                         }
                     }
+                    ExternalStreamEvent::WebRTCIceRestart { offer_sdp, answer } => {
+                        info!("restarting browser ICE without disconnecting moonlight");
+                        let result = restart_peer_ice(&peer, offer_sdp).await;
+                        if answer.send(result).is_err() {
+                            warn!("browser left before the ICE restart answer was delivered");
+                        }
+                    }
                     ExternalStreamEvent::Stop => {
                         info!("closing the stream");
                         let _ = stop_sender.send(true);
@@ -646,6 +677,30 @@ pub async fn webrtc_patch(
     let stream = app.stream_by_id(stream_id).await?;
 
     match request.headers().get(header::CONTENT_TYPE) {
+        Some(x)
+            if x.to_str()
+                .map(|x| x.starts_with("application/sdp"))
+                .unwrap_or(false) =>
+        {
+            let (answer_sender, answer_receiver) = oneshot::channel();
+            stream
+                .send_event(
+                    &mut user,
+                    ExternalStreamEvent::WebRTCIceRestart {
+                        offer_sdp: body,
+                        answer: answer_sender,
+                    },
+                )
+                .await?;
+
+            match timeout(Duration::from_secs(15), answer_receiver).await {
+                Ok(Ok(Ok(answer))) => Ok(HttpResponse::Ok()
+                    .content_type("application/sdp")
+                    .body(answer)),
+                Ok(Ok(Err(err))) => Err(err),
+                Ok(Err(_)) | Err(_) => Err(AppError::StreamClosed),
+            }
+        }
         Some(x)
             if x.to_str()
                 .map(|x| x.starts_with("application/trickle-ice-sdpfrag"))
@@ -722,4 +777,75 @@ pub async fn webrtc_delete_all(
     }
 
     Ok(HttpResponse::Ok().body(stopped.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn ice_restart_renegotiates_the_existing_answer_peer() {
+        let api = APIBuilder::new().build();
+        let offer_peer = api
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        let answer_peer = api
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        offer_peer
+            .create_data_channel("controller", None)
+            .await
+            .unwrap();
+
+        let offer = offer_peer.create_offer(None).await.unwrap();
+        let mut offer_gathered = offer_peer.gathering_complete_promise().await;
+        offer_peer.set_local_description(offer).await.unwrap();
+        let _ = timeout(Duration::from_secs(5), offer_gathered.recv()).await;
+        answer_peer
+            .set_remote_description(offer_peer.local_description().await.unwrap())
+            .await
+            .unwrap();
+        let answer = answer_peer.create_answer(None).await.unwrap();
+        let mut answer_gathered = answer_peer.gathering_complete_promise().await;
+        answer_peer.set_local_description(answer).await.unwrap();
+        let _ = timeout(Duration::from_secs(5), answer_gathered.recv()).await;
+        offer_peer
+            .set_remote_description(answer_peer.local_description().await.unwrap())
+            .await
+            .unwrap();
+
+        let answer_peer_id = answer_peer.get_stats_id().to_owned();
+        let restart_offer = offer_peer
+            .create_offer(Some(RTCOfferOptions {
+                ice_restart: true,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut restart_offer_gathered = offer_peer.gathering_complete_promise().await;
+        offer_peer
+            .set_local_description(restart_offer)
+            .await
+            .unwrap();
+        let _ = timeout(Duration::from_secs(5), restart_offer_gathered.recv()).await;
+
+        let restart_answer = restart_peer_ice(
+            &answer_peer,
+            offer_peer.local_description().await.unwrap().sdp,
+        )
+        .await
+        .unwrap();
+        offer_peer
+            .set_remote_description(RTCSessionDescription::answer(restart_answer).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(answer_peer.get_stats_id(), answer_peer_id);
+        offer_peer.close().await.unwrap();
+        answer_peer.close().await.unwrap();
+    }
 }

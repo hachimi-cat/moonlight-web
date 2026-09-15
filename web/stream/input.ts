@@ -270,7 +270,13 @@ export class StreamInput {
     }
     onMouseMove(event: MouseEvent, rect: DOMRect) {
         if (this.config.mouseMode == "relative") {
-            this.sendMouseMoveClientCoordinates(event.movementX, event.movementY, rect)
+            // Pointer-lock movement is already a relative device delta. It
+            // must not be multiplied by stream pixels / CSS pixels: that
+            // ratio changes with resolution and DPR (1.5x on a 1440p stream
+            // shown in a 1707px-wide viewport), making the same physical
+            // mouse suddenly much faster at higher quality. Absolute/touch
+            // paths below still need coordinate scaling.
+            this.sendMouseMove(event.movementX, event.movementY)
         } else if (this.config.mouseMode == "follow") {
             this.sendMousePositionClientCoordinates(event.clientX, event.clientY, rect)
         } else if (this.config.mouseMode == "localCursor") {
@@ -288,9 +294,14 @@ export class StreamInput {
     }
 
     sendMouseMove(movementX: number, movementY: number) {
+        const deltaX = Math.max(-32768, Math.min(32767, Math.trunc(movementX)))
+        const deltaY = Math.max(-32768, Math.min(32767, Math.trunc(movementY)))
+        if (deltaX == 0 && deltaY == 0) {
+            return
+        }
         this.controlStream?.send(new ClientInputEvent.MouseMoveRelative({
-            deltaX: movementX,
-            deltaY: movementY,
+            deltaX,
+            deltaY,
         }))
     }
     sendMouseMoveClientCoordinates(movementX: number, movementY: number, rect: DOMRect) {

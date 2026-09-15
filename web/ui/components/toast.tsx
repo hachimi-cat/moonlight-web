@@ -36,7 +36,7 @@ export function Toast(props: { message: string; level: ToastLevel; onDismiss: ()
                 onClick={onDismiss}
                 aria-label="Dismiss"
                 className={cn(
-                    "-mr-1 -mt-1 shrink-0 rounded p-1 text-pw-muted transition-colors",
+                    "-mr-1.5 -mt-1.5 flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded text-pw-muted transition-colors",
                     "hover:bg-pw-surface-2 hover:text-pw-fg",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pw-accent/40",
                 )}

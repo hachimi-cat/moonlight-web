@@ -2,7 +2,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use tokio::{
     spawn,
-    sync::{mpsc::Sender, watch},
+    sync::{mpsc::Sender, oneshot, watch},
     time::{sleep, timeout},
 };
 use tracing::{debug, warn};
@@ -13,7 +13,16 @@ use crate::app::{
 };
 
 pub enum ExternalStreamEvent {
-    WebRTCAddIceCandidate { ice_sdp_frag: String },
+    WebRTCAddIceCandidate {
+        ice_sdp_frag: String,
+    },
+    /// Renegotiate ICE on the existing WebRTC peer. The Moonlight/Apollo
+    /// stream deliberately stays alive so its virtual XInput device keeps
+    /// the same Windows slot while a dead browser media route is repaired.
+    WebRTCIceRestart {
+        offer_sdp: String,
+        answer: oneshot::Sender<Result<String, AppError>>,
+    },
     Stop,
 }
 

@@ -212,6 +212,10 @@ class ViewerApp implements Component {
     private toggleFullscreenWithKeybind: boolean = false
 
     private hasShownFullscreenEscapeWarning = false
+    /** Pawpado game launches enter relative mouse mode on the first trusted
+     * desktop click. Open Desktop intentionally omits the flag. */
+    private pawpadoAutoPointerLock = new URLSearchParams(window.location.search)
+        .get("pawpadoPointerLock") == "1"
 
     constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>) {
         this.api = api
@@ -754,6 +758,15 @@ class ViewerApp implements Component {
             return
         }
 
+        if (this.pawpadoAutoPointerLock && !document.pointerLockElement) {
+            event.preventDefault()
+            event.stopPropagation()
+            void this.requestPointerLock(true).catch(error => {
+                console.warn("failed to enter Pawpado pointer lock", error)
+            })
+            return
+        }
+
         this.onUserInteraction()
 
         event.preventDefault()
@@ -924,7 +937,7 @@ class ViewerApp implements Component {
                 console.warn("Keyboard lock failed, skipping notification.", e);
             }
 
-            if (this.getStream()?.getInput().getConfig().mouseMode == "relative") {
+            if (this.pawpadoAutoPointerLock || this.getStream()?.getInput().getConfig().mouseMode == "relative") {
                 await this.requestPointerLock()
             }
 

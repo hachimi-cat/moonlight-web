@@ -13,6 +13,7 @@ import "./tailwind.tw.css"
  */
 
 const REMOVAL_TIME_MS = 10000
+const MAX_VISIBLE_NOTIFICATIONS = 3
 
 type Entry = { id: number; message: string; level: ToastLevel }
 
@@ -52,7 +53,10 @@ export function mountNotifications(host: HTMLElement) {
 
 export function pushNotification(message: string, level: ToastLevel) {
     const entry: Entry = { id: nextId++, message, level }
-    entries = [...entries, entry]
+    // Repeated transport failures must not cover the game. Keep the newest
+    // few actionable messages; older entries still expire harmlessly when
+    // their timers fire.
+    entries = [...entries, entry].slice(-MAX_VISIBLE_NOTIFICATIONS)
     render()
 
     setTimeout(() => dismiss(entry.id), REMOVAL_TIME_MS)
