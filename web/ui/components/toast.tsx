@@ -22,7 +22,10 @@ export function Toast(props: { message: string; level: ToastLevel; onDismiss: ()
         <div
             role={level === "error" ? "alert" : "status"}
             className={cn(
-                "pointer-events-auto flex w-full max-w-sm items-start gap-3",
+                // Size the dark surface to the message. The fixed host gives
+                // us the viewport-safe maximum; `w-full` here made even a
+                // short error look like a full-width screen banner.
+                "pointer-events-auto flex w-fit max-w-sm items-start gap-3",
                 "rounded-[var(--radius-pw)] border bg-pw-surface/95 px-3.5 py-3",
                 "shadow-lg shadow-black/40 backdrop-blur-sm",
                 ring,
