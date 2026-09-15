@@ -11,6 +11,7 @@ use crate::api::{
     host::{
         cancel_host, delete_host, get_host, list_hosts, pair_host, patch_host, post_host, wake_host,
     },
+    launch_state::get_launch_state,
     role::{add_role, delete_role, get_role, list_roles, patch_role},
     settings::{get_default_settings, get_permissions},
     stream::{
@@ -29,6 +30,7 @@ pub(super) mod bindings_ext;
 pub mod app;
 pub mod auth;
 pub mod host;
+pub mod launch_state;
 pub mod role;
 pub mod settings;
 pub mod stream;
@@ -60,6 +62,7 @@ pub fn api_service() -> impl HttpServiceFactory {
             // -- Apps
             get_apps,
             get_app_image,
+            get_launch_state,
         ])
         .service(services![
             // -- Users

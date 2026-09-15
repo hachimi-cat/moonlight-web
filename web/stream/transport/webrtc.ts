@@ -400,7 +400,10 @@ export class WebRTCTransport implements Transport {
             this.lastVideoLost = null
             this.lastVideoFramesDecoded = null
             this.lastVideoFrameProgressAt = now
-            this.logger?.debug("WebRTC ICE restart completed; controller session preserved")
+            this.logger?.debug(
+                "WebRTC ICE restart completed; controller session preserved",
+                { type: "recover" },
+            )
         } catch (error) {
             // Do not fall through to DELETE+POST for a controller launch: that
             // is exactly what migrates the virtual pad to another XInput slot.
@@ -408,7 +411,10 @@ export class WebRTCTransport implements Transport {
             const now = Date.now()
             this.lastMediaProgressAt = now
             this.lastVideoFrameProgressAt = now
-            this.logger?.debug(`in-place WebRTC ICE restart failed: ${error}`)
+            this.logger?.debug(
+                `in-place WebRTC ICE restart failed: ${error}`,
+                { type: "recover" },
+            )
         } finally {
             this.iceRestartRunning = false
             this.startMediaWatchdog()

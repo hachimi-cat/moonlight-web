@@ -1,6 +1,6 @@
 import "./polyfill/index"
 import "./styles/index"
-import { Api, apiGetHost, apiGetRole, apiHostCancel, getApi } from "./api"
+import { Api, apiGetHost, apiGetPawpadoLaunchState, apiGetRole, apiHostCancel, getApi } from "./api"
 import { Component } from "./component/index"
 import { showNotification } from "./component/notification"
 import { getModalBackground, showMessage, showModal } from "./component/modal/index"
@@ -19,27 +19,9 @@ import { requestKeyboardLock } from "./iframe"
 import { InfoEvent, Stream, StreamCapabilities } from "./stream/index"
 import { ConnectionInfoModal } from "./component/connection_info_modal"
 import { wait } from "./util"
+import { PawpadoLaunchOverlay, parsePawpadoGamePresentation } from "./component/pawpado_launch_overlay"
 
 let I = getTranslations(getCurrentLanguage())
-
-function visibleGamepad(): Gamepad | null {
-    try {
-        return Array.from(navigator.getGamepads()).find(gamepad => gamepad != null) ?? null
-    } catch {
-        return null
-    }
-}
-
-function activeGamepad(): Gamepad | null {
-    try {
-        return Array.from(navigator.getGamepads()).find(gamepad => gamepad != null && (
-            gamepad.buttons.some(button => button.pressed || button.value > 0.05) ||
-            gamepad.axes.some(axis => Math.abs(axis) > 0.12)
-        )) ?? null
-    } catch {
-        return null
-    }
-}
 
 function isIOSWebKit(): boolean {
     const ua = navigator.userAgent
@@ -50,9 +32,18 @@ function isIOSWebKit(): boolean {
 async function startApp() {
     const uniffiInit = uniffiInitAsync()
 
+    const queryParams = new URLSearchParams(location.search)
+    const gamePresentation = parsePawpadoGamePresentation(queryParams)
+    const launchOverlay = gamePresentation
+        ? new PawpadoLaunchOverlay(gamePresentation)
+        : null
+    if (launchOverlay) {
+        if (document.body) launchOverlay.mount(document.body)
+        else document.addEventListener("DOMContentLoaded", () => launchOverlay.mount(document.body), { once: true })
+    }
+
     const api = await getApi()
 
-    const queryParams = new URLSearchParams(location.search)
     let lang = parseLanguageFromQuery(queryParams)
     const bootstrapRole = await apiGetRole(api, { id: null })
     if (!lang) {
@@ -119,7 +110,7 @@ async function startApp() {
     uniffiSetLogger(new CustomUniffiLogger(), LogLevel.Debug)
 
     // Start and Mount App
-    const app = new ViewerApp(api, hostId, appId, bootstrapRole.role, parseSettingsFromQuery(queryParams))
+    const app = new ViewerApp(api, hostId, appId, bootstrapRole.role, parseSettingsFromQuery(queryParams), launchOverlay)
     app.mount(rootElement);
 
     (window as any)["app"] = app
@@ -206,8 +197,10 @@ class ViewerApp implements Component {
     private manualFullscreenExitRequested: boolean = false
 
     private soundGateShown: boolean = false
-    private controllerGateShown: boolean = false
     private pageExitHandled: boolean = false
+    private directGameLaunchStarted: boolean = false
+    private reconnectOverlayRunning: boolean = false
+    private launchOverlay: PawpadoLaunchOverlay | null
 
     private toggleFullscreenWithKeybind: boolean = false
 
@@ -217,10 +210,22 @@ class ViewerApp implements Component {
     private pawpadoAutoPointerLock = new URLSearchParams(window.location.search)
         .get("pawpadoPointerLock") == "1"
 
-    constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>) {
+    constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>, launchOverlay: PawpadoLaunchOverlay | null = null) {
         this.api = api
         this.hostId = hostId
         this.appId = appId
+        this.launchOverlay = launchOverlay
+
+        this.launchOverlay?.setCancelHandler(async () => {
+            await this.cancelAndReturnToLibrary()
+        })
+        this.launchOverlay?.setRetryHandler(async () => {
+            this.pageExitHandled = true
+            try {
+                await apiHostCancel(this.api, { host_id: this.hostId })
+            } catch { }
+            window.location.reload()
+        })
 
         const defaultSettings = getLocalStreamSettings(bootstrapRole.default_settings)
         const settings = {
@@ -359,11 +364,16 @@ class ViewerApp implements Component {
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))
 
-        // Create connection info modal
-        const connectionInfo = new ConnectionInfoModal()
-        const connectionInfoListener = connectionInfo.onInfo.bind(connectionInfo)
-        this.stream.addInfoListener(connectionInfoListener)
-        showModal(connectionInfo)
+        // Direct game links own a full-screen, game-specific progress surface.
+        // Desktop/system links keep Moonlight's ordinary connection modal.
+        if (this.launchOverlay) {
+            this.launchOverlay.mount(document.body)
+        } else {
+            const connectionInfo = new ConnectionInfoModal()
+            const connectionInfoListener = connectionInfo.onInfo.bind(connectionInfo)
+            this.stream.addInfoListener(connectionInfoListener)
+            showModal(connectionInfo)
+        }
 
         // Start animation frame loop
         this.onTouchUpdate()
@@ -385,12 +395,36 @@ class ViewerApp implements Component {
             const appName = data.appName
 
             document.title = `Stream: ${appName}`
+        } else if (data.type == "addDebugLine" && this.launchOverlay) {
+            const line = data.line.trim()
+            if (data.additional?.type == "fatal" || data.additional?.type == "fatalDescription") {
+                this.launchOverlay.fail("Connection failed", this.readableStreamError(line))
+            } else if (data.additional?.type == "informError") {
+                showNotification(line, "error")
+            } else if (
+                data.additional?.type == "recover" ||
+                /media .*reconnecting|falling back to web socket/i.test(line)
+            ) {
+                if (/completed|connected successfully/i.test(line)) {
+                    void this.finishReconnectOverlay()
+                } else if (/restart|reconnect|falling back/i.test(line)) {
+                    this.launchOverlay.showReconnect()
+                }
+            }
         } else if (data.type == "connectionComplete") {
             this.sidebar.onCapabilitiesChange(data.capabilities)
 
             this.armFullscreenOnNextInteraction()
-            await this.showControllerLaunchGate()
-            this.showIOSSoundGate()
+            if (this.launchOverlay) {
+                if (!this.directGameLaunchStarted) {
+                    this.directGameLaunchStarted = true
+                    void this.finishDirectGameLaunch()
+                } else {
+                    void this.finishReconnectOverlay()
+                }
+            } else {
+                this.showIOSSoundGate()
+            }
         } else if (data.type == "streamEnded") {
             // Quit-the-game closes the tab, but ONLY when the embedder asked
             // for it (?autoclose=1). A ServerTermination packet is the best
@@ -413,6 +447,17 @@ class ViewerApp implements Component {
                     window.close()
                 }
             }
+            if (this.launchOverlay) {
+                if (data.graceful || autoClose) {
+                    this.launchOverlay.end()
+                } else {
+                    this.launchOverlay.fail(
+                        "Connection to the machine was lost",
+                        "The game may still be running. Try reopening it from your library.",
+                    )
+                }
+                return
+            }
             // Reached when we didn't close — including a window.close() the
             // browser refused. Without this the player is left staring at
             // the frozen last frame.
@@ -420,113 +465,125 @@ class ViewerApp implements Component {
         }
     }
 
-    /**
-     * Do not treat a merely enumerated Gamepad as proof that controller input
-     * reaches the host. The stream/control channel must be live first; then a
-     * real press is forwarded to Apollo's virtual XInput pad while its game
-     * launcher waits for the corresponding press and release.
-     */
-    private async showControllerLaunchGate(): Promise<void> {
-        if (
-            new URLSearchParams(window.location.search).get("pawpadoController") != "1" ||
-            this.controllerGateShown ||
-            !document.body
-        ) {
+    private readableStreamError(line: string): string {
+        if (!line || /candidate:|ice candidate/i.test(line)) {
+            return "The secure stream could not be established. Try again from your library."
+        }
+        return line.length > 240 ? `${line.slice(0, 237)}…` : line
+    }
+
+    private async waitForMatchingGameProcess(): Promise<void> {
+        if (!this.launchOverlay) return
+        const deadline = Date.now() + 60_000
+        let sawState = false
+        while (Date.now() < deadline) {
+            let terminalError: Error | null = null
+            try {
+                const state = await apiGetPawpadoLaunchState(this.api)
+                if (state?.slug == this.launchOverlay.game.slug) {
+                    sawState = true
+                    if (state.state == "failed") {
+                        terminalError = new Error(state.message || "The game process could not be started.")
+                    }
+                    if (state.state == "exited") {
+                        terminalError = new Error("The game closed before its first picture was ready.")
+                    }
+                    if (state.state == "preparing" || state.state == "starting" || state.state == "running") {
+                        this.launchOverlay.setLaunchState(state.state, state.message)
+                    }
+                    if (state.state == "running") return
+                }
+            } catch {
+                // The status file may not exist during the launcher's first
+                // few milliseconds. Keep the secure stream covered and poll.
+            }
+            if (terminalError) throw terminalError
+            await wait(350)
+        }
+        throw new Error(sawState
+            ? `${this.launchOverlay.game.title} did not finish opening in time.`
+            : "The computer did not report game launch progress in time.")
+    }
+
+    private async waitForFreshVideoFrame(): Promise<void> {
+        const deadline = Date.now() + 8_000
+        let video: HTMLVideoElement | null = null
+        while (Date.now() < deadline) {
+            video = document.querySelector("video.video-stream")
+            if (video) break
+            const canvas = document.querySelector("canvas.video-stream") as HTMLCanvasElement | null
+            if (canvas?.width && canvas.height) {
+                // Canvas pipelines do not expose requestVideoFrameCallback.
+                // Keep the cover up for several presentation intervals after
+                // the process marker rather than revealing the desktop frame.
+                await wait(700)
+                return
+            }
+            await wait(80)
+        }
+        if (!video) throw new Error("The game opened, but no video frame arrived.")
+
+        const frameVideo = video as HTMLVideoElement & {
+            requestVideoFrameCallback?: (callback: () => void) => number
+            cancelVideoFrameCallback?: (id: number) => void
+        }
+        if (!frameVideo.requestVideoFrameCallback) {
+            await wait(700)
             return
         }
-        this.controllerGateShown = true
-
-        const overlay = document.createElement("section")
-        overlay.setAttribute("role", "dialog")
-        overlay.setAttribute("aria-modal", "true")
-        overlay.setAttribute("aria-labelledby", "controller-gate-title")
-        overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;box-sizing:border-box;padding:24px;background:rgba(16,13,12,.96);color:#f7f3ef;font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;touch-action:manipulation"
-
-        const card = document.createElement("div")
-        card.style.cssText = "width:min(440px,100%);box-sizing:border-box;border:1px solid rgba(255,255,255,.14);border-radius:18px;background:#1b1614;padding:26px;box-shadow:0 24px 80px rgba(0,0,0,.55)"
-        card.innerHTML = "<p style=\"margin:0 0 8px;color:#d9a67b;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase\">Controller check</p><h1 id=\"controller-gate-title\" style=\"margin:0;font-size:24px;line-height:1.2\">Press any controller button</h1><p style=\"margin:10px 0 0;color:#c9bdb4\">We will verify the input reaches your cloud computer before opening the game.</p>"
-
-        const status = document.createElement("p")
-        status.setAttribute("role", "status")
-        status.setAttribute("aria-live", "polite")
-        status.textContent = visibleGamepad()
-            ? "Controller found — waiting for a button press…"
-            : "Waiting for controller input…"
-        status.style.cssText = "margin:18px 0 0;color:#f1c7a2;font-weight:650"
-
-        const help = document.createElement("div")
-        help.hidden = true
-        help.style.cssText = "margin-top:18px;border-radius:12px;background:#120f0e;padding:14px;color:#c9bdb4;font-size:13px"
-        help.innerHTML = "<strong style=\"display:block;color:#f7f3ef;margin-bottom:6px\">Still not detected in Windows Chrome?</strong>Open <code style=\"user-select:all;color:#f1c7a2\">chrome://flags/#enable-windows-gameinput-data-fetcher</code>, set <strong>Enable GameInput data fetcher</strong> to Enabled, completely relaunch Chrome, and connect the controller before Chrome opens."
-
-        const skip = document.createElement("button")
-        skip.type = "button"
-        skip.textContent = "Continue without controller"
-        skip.style.cssText = "margin-top:20px;width:100%;min-height:46px;border:1px solid rgba(255,255,255,.18);border-radius:11px;background:transparent;color:#f7f3ef;font:inherit;font-weight:650;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent"
-
-        card.append(status, help, skip)
-        overlay.appendChild(card)
-        for (const name of ["pointerdown", "pointerup", "touchstart", "touchmove", "touchend", "click"]) {
-            overlay.addEventListener(name, event => event.stopPropagation(), { passive: name != "touchend" })
-        }
-        document.body.appendChild(overlay)
-        skip.focus()
-
-        await new Promise<void>(resolve => {
-            let settled = false
-            let activeSeen = false
-            let launchPulseSent = false
-            const finish = () => {
-                if (settled) return
-                settled = true
-                clearInterval(poll)
-                clearTimeout(helpTimer)
-                window.removeEventListener("gamepadconnected", onConnected)
-                overlay.remove()
+        await new Promise<void>((resolve, reject) => {
+            const callbackId = frameVideo.requestVideoFrameCallback!(() => {
+                clearTimeout(timeout)
                 resolve()
-            }
-            const onConnected = () => {
-                status.textContent = "Controller found — press any button…"
-            }
-            const poll = window.setInterval(() => {
-                if (activeGamepad()) {
-                    if (!launchPulseSent) {
-                        // The visible browser state is not enough: send a
-                        // deterministic press/release through the live
-                        // control channel so the host-side XInput gate can
-                        // prove the complete path before starting the EXE.
-                        launchPulseSent = true
-                        this.stream.getInput().pulseControllerForLaunch()
-                    }
-                    activeSeen = true
-                    status.textContent = "Controller confirmed — release the button to start…"
-                    return
-                }
-                if (activeSeen) {
-                    finish()
-                } else if (visibleGamepad()) {
-                    status.textContent = "Controller found — waiting for a button press…"
-                }
-            }, 50)
-            const helpTimer = window.setTimeout(() => {
-                if (!activeSeen) {
-                    status.textContent = "No controller button press detected yet."
-                    if (/Windows/i.test(navigator.userAgent) && /Chrome\//i.test(navigator.userAgent)) {
-                        help.hidden = false
-                    }
-                }
-            }, 8000)
-
-            window.addEventListener("gamepadconnected", onConnected)
-            skip.addEventListener("click", () => {
-                // Validate the same browser-to-host input path without
-                // leaking a button into the game: the host waits for this
-                // synthetic press AND release before it starts the EXE.
-                this.stream.getInput().pulseControllerForLaunch()
-                status.textContent = "Starting without controller…"
-                window.setTimeout(finish, 180)
-            }, { once: true })
+            })
+            const timeout = window.setTimeout(() => {
+                frameVideo.cancelVideoFrameCallback?.(callbackId)
+                reject(new Error("The game opened, but its picture stopped updating."))
+            }, 8_000)
         })
+    }
+
+    private async finishDirectGameLaunch() {
+        if (!this.launchOverlay) return
+        const controllerReady = this.launchOverlay.waitForController(() => this.onUserInteraction())
+        try {
+            await this.waitForMatchingGameProcess()
+            await this.waitForFreshVideoFrame()
+            await controllerReady
+            this.launchOverlay.hide()
+        } catch (error) {
+            this.launchOverlay.fail(
+                `Couldn’t open ${this.launchOverlay.game.title}`,
+                error instanceof Error ? error.message : "The game did not finish opening.",
+            )
+        }
+    }
+
+    private async finishReconnectOverlay() {
+        if (!this.launchOverlay || this.reconnectOverlayRunning || !this.launchOverlay.isVisible()) return
+        this.reconnectOverlayRunning = true
+        try {
+            await this.waitForFreshVideoFrame()
+            this.launchOverlay.hide()
+        } catch (error) {
+            this.launchOverlay.fail(
+                "The stream could not recover",
+                error instanceof Error ? error.message : "No fresh game picture arrived.",
+            )
+        } finally {
+            this.reconnectOverlayRunning = false
+        }
+    }
+
+    private async cancelAndReturnToLibrary() {
+        this.pageExitHandled = true
+        try {
+            await apiHostCancel(this.api, { host_id: this.hostId })
+        } catch { }
+        window.close()
+        window.setTimeout(() => {
+            if (!document.hidden) window.location.assign("/dashboard/games")
+        }, 120)
     }
 
     private async shouldAutoClose(graceful: boolean): Promise<boolean> {

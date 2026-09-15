@@ -456,6 +456,24 @@ export async function apiHostCancel(
     return response as PostCancelResponse
 }
 
+export type PawpadoLaunchState = {
+    slug: string
+    title: string
+    state: "preparing" | "starting" | "running" | "exited" | "failed"
+    updatedAt: number
+    pid: number | null
+    message: string | null
+}
+
+/** Read Pawpado's fixed, launcher-owned progress record from this host. */
+export async function apiGetPawpadoLaunchState(api: Api): Promise<PawpadoLaunchState | null> {
+    const response = await fetchApi(api, "/launch-state", GET, { response: "ignore" }, 2500)
+    if (response.status == 204) {
+        return null
+    }
+    return await response.json() as PawpadoLaunchState
+}
+
 export type WebRTCConfiguration = {
     iceServers: Array<RTCIceServer>
 }
