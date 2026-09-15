@@ -459,6 +459,8 @@ export async function apiHostCancel(
 export type PawpadoLaunchState = {
     slug: string
     title: string
+    /** Unique owner for one launcher invocation. Older hosts omit it. */
+    launchId?: string
     state: "preparing" | "starting" | "running" | "exited" | "failed"
     updatedAt: number
     pid: number | null

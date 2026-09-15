@@ -1,6 +1,6 @@
 import "./polyfill/index"
 import "./styles/index"
-import { Api, apiGetHost, apiGetPawpadoLaunchState, apiGetRole, apiHostCancel, getApi } from "./api"
+import { Api, PawpadoLaunchState, apiGetHost, apiGetPawpadoLaunchState, apiGetRole, apiHostCancel, getApi } from "./api"
 import { Component } from "./component/index"
 import { showNotification } from "./component/notification"
 import { getModalBackground, showMessage, showModal } from "./component/modal/index"
@@ -43,6 +43,13 @@ async function startApp() {
     }
 
     const api = await getApi()
+    // Snapshot the previous launch before this page asks Apollo to start
+    // anything. The on-box state file survives between games; without this
+    // baseline an immediate replay can mistake the previous run's `running`
+    // or `exited` marker for the new one and uncover/abort the loading UI.
+    const launchStateBaseline = launchOverlay
+        ? await apiGetPawpadoLaunchState(api).catch(() => null)
+        : null
 
     let lang = parseLanguageFromQuery(queryParams)
     const bootstrapRole = await apiGetRole(api, { id: null })
@@ -110,7 +117,7 @@ async function startApp() {
     uniffiSetLogger(new CustomUniffiLogger(), LogLevel.Debug)
 
     // Start and Mount App
-    const app = new ViewerApp(api, hostId, appId, bootstrapRole.role, parseSettingsFromQuery(queryParams), launchOverlay)
+    const app = new ViewerApp(api, hostId, appId, bootstrapRole.role, parseSettingsFromQuery(queryParams), launchOverlay, launchStateBaseline)
     app.mount(rootElement);
 
     (window as any)["app"] = app
@@ -201,6 +208,8 @@ class ViewerApp implements Component {
     private directGameLaunchStarted: boolean = false
     private reconnectOverlayRunning: boolean = false
     private launchOverlay: PawpadoLaunchOverlay | null
+    private launchStateBaseline: PawpadoLaunchState | null
+    private activeDirectLaunchId: string | null = null
 
     private toggleFullscreenWithKeybind: boolean = false
 
@@ -210,11 +219,12 @@ class ViewerApp implements Component {
     private pawpadoAutoPointerLock = new URLSearchParams(window.location.search)
         .get("pawpadoPointerLock") == "1"
 
-    constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>, launchOverlay: PawpadoLaunchOverlay | null = null) {
+    constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>, launchOverlay: PawpadoLaunchOverlay | null = null, launchStateBaseline: PawpadoLaunchState | null = null) {
         this.api = api
         this.hostId = hostId
         this.appId = appId
         this.launchOverlay = launchOverlay
+        this.launchStateBaseline = launchStateBaseline
 
         this.launchOverlay?.setCancelHandler(async () => {
             await this.cancelAndReturnToLibrary()
@@ -483,8 +493,9 @@ class ViewerApp implements Component {
             let terminalError: Error | null = null
             try {
                 const state = await apiGetPawpadoLaunchState(this.api)
-                if (state?.slug == this.launchOverlay.game.slug) {
+                if (state?.slug == this.launchOverlay.game.slug && this.isFreshLaunchState(state)) {
                     sawState = true
+                    if (state.launchId) this.activeDirectLaunchId = state.launchId
                     if (state.state == "failed") {
                         terminalError = new Error(state.message || "The game process could not be started.")
                     }
@@ -506,6 +517,14 @@ class ViewerApp implements Component {
         throw new Error(sawState
             ? `${this.launchOverlay.game.title} did not finish opening in time.`
             : "The computer did not report game launch progress in time.")
+    }
+
+    private isFreshLaunchState(state: PawpadoLaunchState): boolean {
+        if (!this.launchStateBaseline) return true
+        if (state.launchId && this.launchStateBaseline.launchId) {
+            return state.launchId != this.launchStateBaseline.launchId
+        }
+        return state.updatedAt > this.launchStateBaseline.updatedAt
     }
 
     private async waitForFreshVideoFrame(): Promise<void> {
@@ -594,31 +613,51 @@ class ViewerApp implements Component {
         if (!requested) {
             return false
         }
-        if (graceful) {
-            return true
-        }
-
-        // Apollo can update current_game just after the stream transport
-        // closes, so allow a short settling window. Fail closed: an offline
-        // host or an API error is a connection-loss screen, not an auto-close.
-        for (let attempt = 0; attempt < 3; attempt++) {
-            if (attempt > 0) {
-                await wait(500)
+        // Apollo's app undo hook can emit a graceful termination packet
+        // before Windows display/process cleanup has finished. Closing the
+        // tab on that packet made an immediate replay race the old app and
+        // strand a headless game process. Treat graceful as intent, not proof:
+        // require this launch's terminal marker AND Apollo's paired host view
+        // to report that the app slot is actually free.
+        const deadline = Date.now() + (graceful ? 45_000 : 8_000)
+        let launchExited = this.launchOverlay == null
+        while (Date.now() < deadline) {
+            if (this.launchOverlay) {
+                try {
+                    const state = await apiGetPawpadoLaunchState(this.api)
+                    const belongsToActiveLaunch = state?.slug == this.launchOverlay.game.slug &&
+                        (this.activeDirectLaunchId
+                            ? state.launchId == this.activeDirectLaunchId
+                            : state != null && this.isFreshLaunchState(state))
+                    if (belongsToActiveLaunch) {
+                        if (state.state == "failed") return false
+                        if (state.state == "preparing" || state.state == "starting" || state.state == "running") {
+                            // A delayed packet from an older teardown must
+                            // never close a newly-started game tab.
+                            return false
+                        }
+                        if (state.state == "exited") {
+                            launchExited = true
+                            this.launchOverlay.showClosing()
+                        }
+                    }
+                } catch {
+                    // Keep waiting. A transient state-file/API miss while the
+                    // host unwinds is not permission to close the page.
+                }
             }
 
-            let host
-            try {
-                host = await apiGetHost(this.api, { host_id: this.hostId }, 2000)
-            } catch {
-                return false
+            if (launchExited) {
+                try {
+                    const host = await apiGetHost(this.api, { host_id: this.hostId }, 2500)
+                    if (host.server_state != null && host.current_game != this.appId) return true
+                } catch {
+                    // Apollo's server-info request can time out while its
+                    // synchronous display cleanup is running. Retry until the
+                    // bounded teardown window expires.
+                }
             }
-
-            if (host.server_state == null) {
-                return false
-            }
-            if (host.current_game != this.appId) {
-                return true
-            }
+            await wait(500)
         }
 
         return false

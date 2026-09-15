@@ -293,6 +293,20 @@ export class PawpadoLaunchOverlay {
         this.leave.textContent = "Back to library"
     }
 
+    showClosing() {
+        if (this.parent) this.mount(this.parent)
+        this.controllerCleanup?.()
+        this.root.classList.remove("pw-game-launch-failed", "pw-game-launch-reconnect")
+        this.eyebrow.textContent = "Session complete"
+        this.status.textContent = "Closing the game completely…"
+        this.detail.textContent = "We’ll close this tab as soon as the computer is ready for another launch."
+        this.progress.hidden = false
+        this.controller.hidden = true
+        this.primary.hidden = true
+        this.retry.hidden = true
+        this.leave.textContent = "Back to library"
+    }
+
     fail(title: string, detail: string) {
         if (this.parent) this.mount(this.parent)
         this.controllerCleanup?.()
