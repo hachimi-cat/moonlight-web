@@ -1,0 +1,111 @@
+/*
+ * Tailwind for the React (shadcn) islands ONLY.
+ *
+ * Deliberately imports theme + utilities but NOT `base`. Tailwind's base
+ * layer is Preflight, a global reset — it would strip the margins, list
+ * styles, heading sizes and form-control appearance that the existing
+ * vanilla-TS UI in web/styles/*.css depends on. The two style systems have
+ * to coexist in the same document, so the new one does not get to reset it.
+ *
+ * Consequence: React components here cannot assume a normalised baseline.
+ * Set what you need explicitly (box-sizing, font, line-height) on the island
+ * root — see `.pw-root` below.
+ */
+@layer theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* Tailwind v4 scans for class names; be explicit about where ours live. */
+@source "./";
+
+@theme {
+    /* Pawpado surface palette — dark, matched to the stream overlay so the
+     * React panels read as part of the player rather than a web page. */
+    --color-pw-bg: oklch(0.18 0.012 260);
+    --color-pw-surface: oklch(0.23 0.014 260);
+    --color-pw-surface-2: oklch(0.28 0.016 260);
+    --color-pw-border: oklch(0.36 0.018 260);
+    --color-pw-fg: oklch(0.96 0.004 260);
+    --color-pw-muted: oklch(0.72 0.012 260);
+    --color-pw-accent: oklch(0.72 0.17 145);
+    --color-pw-accent-fg: oklch(0.16 0.02 145);
+    --color-pw-danger: oklch(0.62 0.21 25);
+
+    --radius-pw: 0.625rem;
+}
+
+/*
+ * Island root. Every React mount point gets this class, so the island has a
+ * predictable baseline without a global reset leaking into the vanilla UI.
+ */
+.pw-root,
+.pw-root *,
+.pw-root *::before,
+.pw-root *::after {
+    box-sizing: border-box;
+}
+
+.pw-root {
+    color: var(--color-pw-fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        sans-serif;
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Without Preflight, form controls keep their NATIVE appearance — a <button>
+ * renders as a grey OS button unless every component remembers to override
+ * it. The toast dismiss button shipped looking like a native box for exactly
+ * this reason.
+ *
+ * Declared in the `components` layer, which the @layer statement above orders
+ * BEFORE `utilities`. That matters: as a bare element selector this would
+ * otherwise out-specify the single-class Tailwind utilities (0,1,1 vs 0,1,0)
+ * and stomp every `bg-*`/`border-*` a component sets — the select trigger
+ * included. Layer order decides it instead of specificity, so utilities win.
+ */
+@layer components {
+    .pw-root button,
+    [data-radix-popper-content-wrapper] button,
+    [data-pw-portal] button {
+        appearance: none;
+        background-color: transparent;
+        background-image: none;
+        border: 0;
+        margin: 0;
+        padding: 0;
+        font: inherit;
+        color: inherit;
+        text-align: inherit;
+        cursor: pointer;
+    }
+
+    .pw-root input,
+    [data-pw-portal] input {
+        font: inherit;
+        color: inherit;
+    }
+}
+
+/*
+ * Radix portals render OUTSIDE the island (document.body), so they would lose
+ * the baseline above. Radix tags every portalled surface with a data
+ * attribute; re-apply there.
+ */
+[data-radix-popper-content-wrapper],
+[data-pw-portal] {
+    box-sizing: border-box;
+    color: var(--color-pw-fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        sans-serif;
+    font-size: 0.9375rem;
+    line-height: 1.5;
+}
+
+[data-radix-popper-content-wrapper] *,
+[data-pw-portal] * {
+    box-sizing: border-box;
+}

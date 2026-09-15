@@ -55,6 +55,9 @@ export class AudioElementPlayer implements TrackAudioPlayer {
 
     onUserInteraction(): void {
         this.audioElement.muted = false
+        // Autoplay can be refused outright rather than merely muted; a
+        // play() from inside a gesture is the only reliable recovery.
+        this.audioElement.play().catch(() => { })
     }
 
     mount(parent: HTMLElement): void {

@@ -1,6 +1,6 @@
-import { ComponentEvent } from "../index"
+import { Component, ComponentEvent } from "../index"
 import { getCurrentLanguage, getTranslations } from "../../i18n"
-import { InputComponent } from "../input"
+import { ShadcnInputComponent as InputComponent } from "../../ui/shadcn-input"
 import { FormModal } from "./form"
 
 export type UserAuth = {
@@ -34,8 +34,10 @@ export class ApiUserPasswordPrompt extends FormModal<UserAuth> {
         this.passwordFile.addChangeListener(this.setFilePassword.bind(this))
     }
 
-    private async setFilePassword(event: ComponentEvent<InputComponent>) {
-        const files = event.component.getFiles()
+    // Listener type is widened to ComponentEvent<Component> so the React
+    // drop-ins can dispatch it; narrow back to the component we attached to.
+    private async setFilePassword(event: ComponentEvent<Component>) {
+        const files = (event.component as InputComponent).getFiles()
         if (!files) {
             return
         }

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pawpado UI harness</title>
+    <style>
+        /*
+         * Approximates the stream overlay panel this UI sits inside: dark,
+         * translucent, sitting over video. Deliberately NOT importing the
+         * app's stylesheet, so anything that looks right here is coming from
+         * the components themselves.
+         */
+        body {
+            margin: 0;
+            padding: 2rem;
+            background:
+                radial-gradient(1200px 600px at 20% -10%, #1d2a3a, transparent),
+                #0d1117;
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            color: #e6edf3;
+            min-height: 100vh;
+        }
+
+        h1 {
+            font-size: 1rem;
+            font-weight: 600;
+            opacity: .7;
+            margin: 0 0 1.5rem;
+        }
+
+        #app {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.25rem;
+            align-items: flex-start;
+        }
+
+        .panel {
+            background: rgba(22, 27, 34, .92);
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 1rem 1.25rem 1.25rem;
+            width: 320px;
+        }
+
+        /* The real settings panel is taller than the synthetic ones; give it
+           the sidebar's width and let it scroll like it does in the stream. */
+        .panel-wide {
+            width: 380px;
+            max-height: 78vh;
+            overflow-y: auto;
+        }
+
+        .panel h2 {
+            font-size: .8125rem;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            opacity: .55;
+            margin: 0 0 .75rem;
+        }
+
+        /* The vanilla component's own label markup. */
+        .panel label {
+            display: block;
+            font-size: .8125rem;
+            opacity: .8;
+            margin: .85rem 0 .35rem;
+        }
+
+        #log {
+            margin-top: 1.5rem;
+            font-family: ui-monospace, monospace;
+            font-size: .8125rem;
+            opacity: .6;
+        }
+    </style>
+</head>
+<body>
+    <h1>pawpado &mdash; shadcn select, standalone render</h1>
+    <div id="app"></div>
+    <div id="log">ml-change &rarr; (no change yet)</div>
+    <!-- notification.ts looks this up by id at module load. -->
+    <div id="notification-list"
+         style="position:fixed; top:1rem; right:1rem; z-index:9999; display:flex; flex-direction:column; align-items:flex-end; gap:.5rem;"></div>
+</body>
+</html>

@@ -1,15 +1,10 @@
-import { Component } from "./index"
-import { ERROR_IMAGE, INFO_IMAGE, WARN_IMAGE } from "../resources/index"
-import { ListComponent } from "./list"
+import { mountNotifications, pushNotification } from "../ui/notifications"
 
 type NotificationLevel = "error" | "warn" | "info"
 
-const ERROR_REMOVAL_TIME_MS = 10000
-
 const notificationListElement = document.getElementById("notification-list")
-const notificationListComponent = new ListComponent<NotificationComponent>([], { listClasses: ["notification-list"], elementLiClasses: ["notification-element"] })
 if (notificationListElement) {
-    notificationListComponent.mount(notificationListElement)
+    mountNotifications(notificationListElement)
 }
 
 let alertedNotificationListNotFound = false
@@ -26,22 +21,17 @@ export function showNotification(message: string, level: NotificationLevel = "er
         return;
     }
 
-    let error: NotificationComponent
-    if (level == "error") {
-        error = new NotificationComponent(message, ERROR_IMAGE)
-    } else if (level == "warn") {
-        error = new NotificationComponent(message, WARN_IMAGE)
-    } else if (level = "info") {
-        error = new NotificationComponent(message, INFO_IMAGE)
+    // Upstream wrote `else if (level = "info")` here — an assignment, always
+    // truthy — so an unrecognised level silently rendered as info and the
+    // final branch was dead code. Narrow explicitly instead.
+    if (level == "error" || level == "warn" || level == "info") {
+        pushNotification(message, level)
     } else {
-        error = new NotificationComponent(`Unknown notification level (\"${level}\") for message: ${message}`, ERROR_IMAGE)
+        pushNotification(
+            `Unknown notification level ("${level}") for message: ${message}`,
+            "error",
+        )
     }
-
-    notificationListComponent.append(error)
-
-    setTimeout(() => {
-        notificationListComponent.removeValue(error)
-    }, ERROR_REMOVAL_TIME_MS)
 }
 
 function handleError(event: ErrorEvent) {
@@ -53,25 +43,3 @@ function handleRejection(event: PromiseRejectionEvent) {
 
 window.addEventListener("error", handleError)
 window.addEventListener("unhandledrejection", handleRejection)
-
-class NotificationComponent implements Component {
-    private messageElement: HTMLElement = document.createElement("p")
-    private imageElement: HTMLImageElement = document.createElement("img")
-
-    constructor(message: string, image: string) {
-        this.messageElement.innerText = message
-        this.messageElement.classList.add("notification-message")
-
-        this.imageElement.src = image
-        this.imageElement.classList.add("notification-image")
-    }
-
-    mount(parent: Element): void {
-        parent.appendChild(this.imageElement)
-        parent.appendChild(this.messageElement)
-    }
-    unmount(parent: Element): void {
-        parent.removeChild(this.imageElement)
-        parent.removeChild(this.messageElement)
-    }
-}

@@ -11,12 +11,14 @@ use crate::api::{
     host::{
         cancel_host, delete_host, get_host, list_hosts, pair_host, patch_host, post_host, wake_host,
     },
+    launch_state::get_launch_state,
     role::{add_role, delete_role, get_role, list_roles, patch_role},
     settings::{get_default_settings, get_permissions},
     stream::{
         web_socket::web_socket_stream,
         webrtc::{
-            webrtc_delete, webrtc_get, webrtc_middleware, webrtc_options, webrtc_patch, webrtc_post,
+            webrtc_delete, webrtc_delete_all, webrtc_get, webrtc_middleware, webrtc_options,
+            webrtc_patch, webrtc_post,
         },
     },
     user::{add_user, delete_user, get_user, list_users, patch_user},
@@ -28,6 +30,7 @@ pub(super) mod bindings_ext;
 pub mod app;
 pub mod auth;
 pub mod host;
+pub mod launch_state;
 pub mod role;
 pub mod settings;
 pub mod stream;
@@ -59,6 +62,7 @@ pub fn api_service() -> impl HttpServiceFactory {
             // -- Apps
             get_apps,
             get_app_image,
+            get_launch_state,
         ])
         .service(services![
             // -- Users
@@ -93,6 +97,7 @@ pub fn api_service() -> impl HttpServiceFactory {
                 .service(webrtc_get)
                 .service(webrtc_post)
                 .service(webrtc_patch)
-                .service(webrtc_delete),
+                .service(webrtc_delete)
+                .service(webrtc_delete_all),
         )
 }

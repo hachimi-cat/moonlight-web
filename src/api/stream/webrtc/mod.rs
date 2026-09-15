@@ -7,7 +7,7 @@ use actix_web::HttpRequest;
 use actix_web::body::{BoxBody, MessageBody};
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
-use actix_web::web::{Data, Path};
+use actix_web::web::{Data, Path, Query};
 use actix_web::{
     HttpResponse, HttpResponseBuilder, delete, get, http::StatusCode, http::header, options, patch,
     post,
@@ -29,11 +29,15 @@ use moonlight_common::webrtc::answer::WebRTCSessionAnswer;
 use moonlight_common::webrtc::header::WebRTCLinkHeader;
 use moonlight_common::webrtc::offer::WebRTCSessionOffer;
 use moonlight_common::webrtc::sdp::Session;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{self};
-use tokio::time::sleep;
+use tokio::sync::{
+    mpsc::{self},
+    oneshot, watch,
+};
+use tokio::time::{sleep, timeout};
 use tokio::{select, spawn};
 use tracing::{Instrument, debug, debug_span, error, info, instrument, warn};
 use webrtc::api::APIBuilder;
@@ -44,6 +48,7 @@ use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -52,9 +57,9 @@ use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability, RTPCodecType,
 };
 
-use crate::api::stream::apply_role_restrictions;
 use crate::api::stream::webrtc::convert::{into_webrtc_ice_candidate, into_webrtc_network_type};
 use crate::api::stream::webrtc::ice_servers::generate_ice_servers;
+use crate::api::stream::{apply_role_restrictions, stop_conflicting_app};
 use crate::app::App;
 use crate::app::host::HostId;
 use crate::app::stream::{ExternalStreamEvent, Stream, StreamId};
@@ -66,6 +71,16 @@ mod convert;
 mod ice_servers;
 mod stream;
 mod video;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WebRtcGamepadQuery {
+    #[serde(default)]
+    gamepads_attached: u16,
+    #[serde(default)]
+    gamepads_persist_after_disconnect: bool,
+    #[serde(default)]
+    resume_current_app: bool,
+}
 
 pub async fn webrtc_middleware(
     mut req: ServiceRequest,
@@ -199,12 +214,36 @@ fn create_media_engine(video_formats: &HashMap<VideoFormat, RTCRtpCodecParameter
     media_engine
 }
 
+/// Replace only the browser-facing ICE route while retaining the peer's
+/// media tracks, data channel, and the relay's Moonlight connection.
+///
+/// A full WHEP DELETE + POST disconnects Apollo and destroys its ViGEm
+/// target. Games that opened XInput slot 0 keep polling that dead object even
+/// when Apollo creates a replacement in slot 1. An ICE restart repairs the
+/// failed UDP path without crossing that controller lifecycle boundary.
+async fn restart_peer_ice(peer: &RTCPeerConnection, offer_sdp: String) -> Result<String, AppError> {
+    let offer = RTCSessionDescription::offer(offer_sdp)?;
+    peer.set_remote_description(offer).await?;
+
+    let mut ice_complete = peer.gathering_complete_promise().await;
+    let answer = peer.create_answer(None).await?;
+    peer.set_local_description(answer).await?;
+    let _ = timeout(Duration::from_secs(10), ice_complete.recv()).await;
+
+    let answer = peer
+        .local_description()
+        .await
+        .ok_or(AppError::StreamClosed)?;
+    Ok(answer.sdp)
+}
+
 #[post("")]
-#[instrument(skip(app, user, req, session_description), fields(user = %user.id()))]
+#[instrument(skip(app, user, req, gamepads, session_description), fields(user = %user.id()))]
 pub async fn webrtc_post(
     app: Data<App>,
     mut user: AuthenticatedUser,
     req: HttpRequest,
+    gamepads: Query<WebRtcGamepadQuery>,
     session_description: String,
 ) -> Result<HttpResponse, AppError> {
     if !user
@@ -239,6 +278,7 @@ pub async fn webrtc_post(
 
     // Get app
     let app_id = AppId(session.app_id);
+    stop_conflicting_app(&host, app_id, gamepads.resume_current_app).await?;
 
     // Create offer based on the sdp
     let offer = RTCSessionDescription::offer(session_description)?;
@@ -364,8 +404,8 @@ pub async fn webrtc_post(
         local_audio_play_mode: session.local_audio_play_mode,
         // TODO: what audio config?
         audio_config: AudioConfig::STEREO,
-        gamepads_attached: ActiveGamepads::empty(),
-        gamepads_persist_after_disconnect: false,
+        gamepads_attached: ActiveGamepads::from_bits_retain(gamepads.gamepads_attached),
+        gamepads_persist_after_disconnect: gamepads.gamepads_persist_after_disconnect,
         enable_mic: microphone_enabled,
     };
 
@@ -505,6 +545,9 @@ pub async fn webrtc_post(
 
     info!("ice gathering completed, sending answer to client");
 
+    let (stop_sender, stop_receiver) = watch::channel(false);
+    let (stopped_sender, stopped_receiver) = watch::channel(false);
+
     spawn({
         let peer = peer.clone();
 
@@ -515,6 +558,7 @@ pub async fn webrtc_post(
                 audio_channel,
                 video_channel,
                 control_channel,
+                stop_receiver,
             )
             .await
             {
@@ -526,13 +570,15 @@ pub async fn webrtc_post(
             if let Err(err) = peer.close().await {
                 warn!(error = %err, "failed to close webrtc peer");
             }
+
+            let _ = stopped_sender.send(true);
         }
         .instrument(debug_span!("moonlight stream"))
     });
 
     // Add stream to the list of streams
     let (event_sender, mut event_receiver) = mpsc::channel(20);
-    let stream = match Stream::new(&app, &user, event_sender).await {
+    let stream = match Stream::new(&app, &user, event_sender, stopped_receiver).await {
         Ok(value) => value,
         Err(err) => {
             // TODO: cleanup the stream
@@ -545,6 +591,7 @@ pub async fn webrtc_post(
 
     spawn({
         let peer = peer.clone();
+        let stop_sender = stop_sender.clone();
 
         async move {
             loop {
@@ -585,12 +632,17 @@ pub async fn webrtc_post(
                             }
                         }
                     }
+                    ExternalStreamEvent::WebRTCIceRestart { offer_sdp, answer } => {
+                        info!("restarting browser ICE without disconnecting moonlight");
+                        let result = restart_peer_ice(&peer, offer_sdp).await;
+                        if answer.send(result).is_err() {
+                            warn!("browser left before the ICE restart answer was delivered");
+                        }
+                    }
                     ExternalStreamEvent::Stop => {
                         info!("closing the stream");
-
-                        if let Err(err) = peer.close().await {
-                            warn!(error = %err, "error whilst closing the webrtc peer");
-                        }
+                        let _ = stop_sender.send(true);
+                        return;
                     }
                 }
             }
@@ -625,6 +677,30 @@ pub async fn webrtc_patch(
     let stream = app.stream_by_id(stream_id).await?;
 
     match request.headers().get(header::CONTENT_TYPE) {
+        Some(x)
+            if x.to_str()
+                .map(|x| x.starts_with("application/sdp"))
+                .unwrap_or(false) =>
+        {
+            let (answer_sender, answer_receiver) = oneshot::channel();
+            stream
+                .send_event(
+                    &mut user,
+                    ExternalStreamEvent::WebRTCIceRestart {
+                        offer_sdp: body,
+                        answer: answer_sender,
+                    },
+                )
+                .await?;
+
+            match timeout(Duration::from_secs(15), answer_receiver).await {
+                Ok(Ok(Ok(answer))) => Ok(HttpResponse::Ok()
+                    .content_type("application/sdp")
+                    .body(answer)),
+                Ok(Ok(Err(err))) => Err(err),
+                Ok(Err(_)) | Err(_) => Err(AppError::StreamClosed),
+            }
+        }
         Some(x)
             if x.to_str()
                 .map(|x| x.starts_with("application/trickle-ice-sdpfrag"))
@@ -664,11 +740,112 @@ pub async fn webrtc_delete(
 
     let stream = app.stream_by_id(stream_id).await?;
 
-    stream
-        .send_event(&mut user, ExternalStreamEvent::Stop)
+    let stopped = stream
+        .stop_and_wait(&mut user, Duration::from_secs(5))
         .await?;
+    if !stopped {
+        warn!(?stream_id, "timed out waiting for stream teardown");
+    }
 
     Ok(HttpResponse::Ok()
         .finish()
         .set_body(BoxBody::new("stream not found")))
+}
+
+/// Stop every stream the authenticated caller is allowed to control.
+///
+/// Stream IDs are intentionally opaque and may become random while a recently
+/// closed stream is still retained. A host-side lifecycle hook therefore
+/// cannot safely discover the current stream by probing numeric IDs.
+#[delete("")]
+#[instrument(skip(app, user), fields(user = %user.id()))]
+pub async fn webrtc_delete_all(
+    app: Data<App>,
+    mut user: AuthenticatedUser,
+) -> Result<HttpResponse, AppError> {
+    let streams = app.streams().await;
+    let mut stopped = 0;
+
+    for stream in streams {
+        if stream
+            .send_event(&mut user, ExternalStreamEvent::Stop)
+            .await
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+
+    Ok(HttpResponse::Ok().body(stopped.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn ice_restart_renegotiates_the_existing_answer_peer() {
+        let api = APIBuilder::new().build();
+        let offer_peer = api
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        let answer_peer = api
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        offer_peer
+            .create_data_channel("controller", None)
+            .await
+            .unwrap();
+
+        let offer = offer_peer.create_offer(None).await.unwrap();
+        let mut offer_gathered = offer_peer.gathering_complete_promise().await;
+        offer_peer.set_local_description(offer).await.unwrap();
+        let _ = timeout(Duration::from_secs(5), offer_gathered.recv()).await;
+        answer_peer
+            .set_remote_description(offer_peer.local_description().await.unwrap())
+            .await
+            .unwrap();
+        let answer = answer_peer.create_answer(None).await.unwrap();
+        let mut answer_gathered = answer_peer.gathering_complete_promise().await;
+        answer_peer.set_local_description(answer).await.unwrap();
+        let _ = timeout(Duration::from_secs(5), answer_gathered.recv()).await;
+        offer_peer
+            .set_remote_description(answer_peer.local_description().await.unwrap())
+            .await
+            .unwrap();
+
+        let answer_peer_id = answer_peer.get_stats_id().to_owned();
+        let restart_offer = offer_peer
+            .create_offer(Some(RTCOfferOptions {
+                ice_restart: true,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut restart_offer_gathered = offer_peer.gathering_complete_promise().await;
+        offer_peer
+            .set_local_description(restart_offer)
+            .await
+            .unwrap();
+        let _ = timeout(Duration::from_secs(5), restart_offer_gathered.recv()).await;
+
+        let restart_answer = restart_peer_ice(
+            &answer_peer,
+            offer_peer.local_description().await.unwrap().sdp,
+        )
+        .await
+        .unwrap();
+        offer_peer
+            .set_remote_description(RTCSessionDescription::answer(restart_answer).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(answer_peer.get_stats_id(), answer_peer_id);
+        offer_peer.close().await.unwrap();
+        answer_peer.close().await.unwrap();
+    }
 }

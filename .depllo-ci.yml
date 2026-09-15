@@ -1,0 +1,80 @@
+# Depllo CI for the pawpado moonlight-web fork.
+#
+# Replaces the upstream GitHub Actions pipeline (dead since the hachimi-cat
+# Actions billing lock, 2026-08-11). Depllo builds the ONE target Pawpado
+# ships — x86_64-pc-windows-gnu — and mirrors the zip straight to the S3
+# saves bucket, which production machines already prefer over GitHub
+# releases (resolveClientPackageUrl in saas-pawpado). GitHub stays a plain
+# git remote; no Release objects are involved.
+#
+# Release flow: push the pawpado branch (runs `check`), then push a `v*`
+# tag (runs `check` + `mirror-windows`). Bump the three pins in
+# saas-pawpado frontend/src/lib/server/stream-client-sync.ts from the
+# PIN_* lines this job prints.
+
+stages: [check, release]
+
+# The fork keeps an open PR against upstream, so every branch push would
+# otherwise create a second, identical pull_request pipeline.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "pull_request"'
+      when: never
+    - when: always
+
+variables:
+  CARGO_TERM_COLOR: always
+
+check:
+  stage: check
+  image: rust:1.96-bookworm
+  timeout: 40m
+  script:
+    - rustup component add rustfmt clippy
+    - cargo fmt --all -- --check
+    - cargo clippy --all-targets --all-features -- -D warnings
+    - cargo test --workspace --locked
+
+mirror-windows:
+  stage: release
+  image: rust:1.96-bookworm
+  timeout: 60m
+  needs: [check]
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+  script:
+    # Toolchain the rust image lacks: the windows cross-linker, node 22
+    # for the web bundle, awscli for the mirror upload.
+    - apt-get update -qq && apt-get install -qq -y mingw-w64 zip unzip awscli >/dev/null
+    - curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 && apt-get install -qq -y nodejs >/dev/null
+    - rustup target add x86_64-pc-windows-gnu wasm32-unknown-unknown
+    # Prebuilt wasm-bindgen. The CLI version must match the CRATE version
+    # `ubrn checkout` writes into rust_modules/wasm/Cargo.lock during
+    # `npm run build` — pinned, same as the old GitHub workflow.
+    - curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+    - cargo binstall -y --force wasm-bindgen-cli --version 0.2.122
+    # Build exactly what the GitHub pipeline built for this target.
+    - npm ci
+    - npm run build
+    - cargo build --release --target x86_64-pc-windows-gnu
+    # Package layout stream-client sync expects: package/web-server.exe +
+    # package/static/** and NOTHING else — a package/server/ entry would
+    # unpair every machine at reconcile.
+    - rm -rf package && mkdir package
+    - cp target/x86_64-pc-windows-gnu/release/web-server.exe package/
+    - mv dist package/static
+    - zip -qr moonlight-web-x86_64-pc-windows-gnu.zip package
+    - unzip -l moonlight-web-x86_64-pc-windows-gnu.zip | awk '$4 ~ /^package\/server\//{bad=1} END{exit bad}'
+    # Mirror to the bucket machines download from, then prove the round
+    # trip by re-downloading and comparing hashes.
+    - aws s3 cp moonlight-web-x86_64-pc-windows-gnu.zip "s3://$PAWPADO_SAVES_BUCKET/saves/client/$CI_COMMIT_TAG/moonlight-web-x86_64-pc-windows-gnu.zip" --region "$PAWPADO_AWS_REGION"
+    - aws s3 cp "s3://$PAWPADO_SAVES_BUCKET/saves/client/$CI_COMMIT_TAG/moonlight-web-x86_64-pc-windows-gnu.zip" roundtrip.zip --region "$PAWPADO_AWS_REGION"
+    - test "$(sha256sum moonlight-web-x86_64-pc-windows-gnu.zip | cut -d' ' -f1)" = "$(sha256sum roundtrip.zip | cut -d' ' -f1)"
+    # The three pin values for stream-client-sync.ts, in order.
+    - echo "PIN_VERSION=$CI_COMMIT_SHORT_SHA"
+    - echo "PIN_TAG=$CI_COMMIT_TAG"
+    - echo "PIN_SHA256=$(sha256sum moonlight-web-x86_64-pc-windows-gnu.zip | cut -d' ' -f1)"
+  artifacts:
+    paths: [moonlight-web-x86_64-pc-windows-gnu.zip]

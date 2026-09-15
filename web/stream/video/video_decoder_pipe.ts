@@ -208,6 +208,14 @@ export class VideoDecoderPipe implements DataVideoRenderer {
             console.debug("Cannot submit video decode unit because the stream errored")
             return
         }
+        // A closed decoder throws InvalidStateError on decode/reset/configure.
+        // When the host quits, cleanup() closes it while frames are still in
+        // flight, and that throw propagated out of the transport's receive
+        // path — which is what surfaced as an unexplained "The object is in
+        // an invalid state" at the end of every stream.
+        if (this.decoder.state == "closed") {
+            return
+        }
         if (!this.decoderSetupFinished) {
             this.bufferedUnits.push(unit)
             return
@@ -273,6 +281,11 @@ export class VideoDecoderPipe implements DataVideoRenderer {
     }
 
     private reset() {
+        // Same closed-decoder guard as submitDecodeUnit: pollRequestIdr runs
+        // on a timer that can outlive cleanup().
+        if (this.decoder.state == "closed") {
+            return
+        }
         if (!this.translator) {
             this.decoder.reset()
             this.needsKeyFrame = true
