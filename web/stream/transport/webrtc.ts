@@ -37,9 +37,7 @@ export class WebRTCTransport implements Transport {
     private lastVideoReceived: number | null = null
     private lastVideoLost: number | null = null
     private lastVideoFramesDecoded: number | null = null
-    private lastVideoFrameSampleAt = 0
     private lastVideoFrameProgressAt = 0
-    private degradedFrameSamples = 0
     private shutdownSignaled = false
     private mediaWatchdogRunning = false
 
@@ -55,10 +53,6 @@ export class WebRTCTransport implements Transport {
     private static readonly VIDEO_FRAME_STALL_MS = 15000
     private static readonly SEVERE_LOSS_RATIO = 0.12
     private static readonly SEVERE_LOSS_MIN_PACKETS = 100
-    private static readonly DEGRADED_FRAME_RATE_RATIO = 0.85
-    private static readonly DEGRADED_FRAME_SAMPLES = 2
-    private static readonly DEGRADED_JITTER_SECONDS = 0.010
-    private static readonly DEGRADED_RTT_SECONDS = 0.080
 
     constructor(api: Api, configuration: RTCConfiguration, logger?: Logger) {
         this.logger = logger
@@ -209,7 +203,6 @@ export class WebRTCTransport implements Transport {
             return
         }
         this.lastMediaProgressAt = Date.now()
-        this.lastVideoFrameSampleAt = this.lastMediaProgressAt
         this.lastVideoFrameProgressAt = this.lastMediaProgressAt
         this.mediaWatchdogTimer = globalObject().setInterval(
             () => void this.checkMediaProgress(),
@@ -235,16 +228,8 @@ export class WebRTCTransport implements Transport {
             let videoReceived: number | null = null
             let videoLost: number | null = null
             let videoFramesDecoded: number | null = null
-            let videoJitterSeconds: number | null = null
-            let currentRttSeconds: number | null = null
 
             for (const [_key, value] of stats) {
-                if (value.type == "candidate-pair" && value.state == "succeeded"
-                    && value.nominated === true
-                    && typeof value.currentRoundTripTime == "number"
-                ) {
-                    currentRttSeconds = value.currentRoundTripTime
-                }
                 if (value.type != "inbound-rtp") {
                     continue
                 }
@@ -255,7 +240,6 @@ export class WebRTCTransport implements Transport {
                     videoReceived = typeof value.packetsReceived == "number" ? value.packetsReceived : null
                     videoLost = typeof value.packetsLost == "number" ? value.packetsLost : null
                     videoFramesDecoded = typeof value.framesDecoded == "number" ? value.framesDecoded : null
-                    videoJitterSeconds = typeof value.jitter == "number" ? value.jitter : null
                 }
             }
 
@@ -286,48 +270,13 @@ export class WebRTCTransport implements Transport {
             }
 
             if (videoFramesDecoded != null) {
-                const sampleDurationSeconds = Math.max(
-                    0.001,
-                    (now - this.lastVideoFrameSampleAt) / 1000,
-                )
                 if (this.lastVideoFramesDecoded == null
                     || videoFramesDecoded > this.lastVideoFramesDecoded
                 ) {
                     this.lastVideoFrameProgressAt = now
                 }
 
-                if (this.lastVideoFramesDecoded != null) {
-                    const decodedFrames = Math.max(
-                        0,
-                        videoFramesDecoded - this.lastVideoFramesDecoded,
-                    )
-                    const expectedFrames = sampleDurationSeconds * (this.sdpOfferOptions?.fps ?? 60)
-                    const frameRateRatio = decodedFrames / Math.max(1, expectedFrames)
-                    const pathUnderPressure =
-                        (videoJitterSeconds ?? 0) >= WebRTCTransport.DEGRADED_JITTER_SECONDS
-                        || (currentRttSeconds ?? 0) >= WebRTCTransport.DEGRADED_RTT_SECONDS
-
-                    if (frameRateRatio < WebRTCTransport.DEGRADED_FRAME_RATE_RATIO
-                        && pathUnderPressure
-                    ) {
-                        this.degradedFrameSamples += 1
-                    } else {
-                        this.degradedFrameSamples = 0
-                    }
-
-                    if (this.degradedFrameSamples >= WebRTCTransport.DEGRADED_FRAME_SAMPLES) {
-                        this.logger?.debug(
-                            `WebRTC video decoded ${(frameRateRatio * 100).toFixed(0)}% of target ` +
-                            `(jitter ${((videoJitterSeconds ?? 0) * 1000).toFixed(1)}ms, ` +
-                            `RTT ${((currentRttSeconds ?? 0) * 1000).toFixed(0)}ms); reconnecting`,
-                        )
-                        await this.closeForRecovery("degraded")
-                        return
-                    }
-                }
-
                 this.lastVideoFramesDecoded = videoFramesDecoded
-                this.lastVideoFrameSampleAt = now
 
                 // Audio or partial video RTP can keep the aggregate packet
                 // counter advancing while the browser receives no complete
