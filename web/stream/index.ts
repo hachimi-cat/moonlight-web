@@ -137,6 +137,7 @@ export class Stream implements Component {
 
     private transportOverride: TransportType | null = null
     private mediaRecoveryAttempts = 0
+    private preserveControllerSession: boolean
 
     private videoRenderer: VideoRenderer | null = null
     private audioPlayer: AudioPlayer | null = null
@@ -146,7 +147,7 @@ export class Stream implements Component {
 
     private streamerSize: [number, number]
 
-    constructor(api: Api, hostId: number, appId: number, settings: Settings, viewerScreenSize: [number, number], permissions: StreamPermissions) {
+    constructor(api: Api, hostId: number, appId: number, settings: Settings, viewerScreenSize: [number, number], permissions: StreamPermissions, preserveControllerSession: boolean = false) {
         this.logger.addInfoListener((info, type) => {
             this.debugLog(info, { type: type ?? undefined })
         })
@@ -158,6 +159,7 @@ export class Stream implements Component {
 
         this.permissions = permissions
         this.settings = settings
+        this.preserveControllerSession = preserveControllerSession
 
         this.streamerSize = getStreamerSize(settings, viewerScreenSize)
 
@@ -345,7 +347,8 @@ export class Stream implements Component {
             {
                 iceServers: config.iceServers,
             },
-            this.logger
+            this.logger,
+            !this.preserveControllerSession,
         )
         transport.controlStream.onreceive = this.boundReceivePacket
 

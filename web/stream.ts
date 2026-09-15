@@ -269,7 +269,14 @@ class ViewerApp implements Component {
         this.autoEnterFullscreenOnStart = settings.enterFullscreenOnStreamStart
         this.toggleFullscreenWithKeybind = settings.toggleFullscreenWithKeybind
 
-        this.stream = new Stream(this.api, hostId, appId, settings, [browserWidth, browserHeight], bootstrapRole.permissions)
+        // Apollo destroys and recreates its ViGEm device when a Moonlight
+        // transport is replaced. Windows can assign the replacement to a
+        // different XInput user slot, while a running game continues polling
+        // the original slot. Pawpado controller launches therefore keep the
+        // established transport: a true peer failure is surfaced to the
+        // player instead of silently reconnecting with a different gamepad.
+        const preserveControllerSession = new URLSearchParams(window.location.search).get("pawpadoController") == "1"
+        this.stream = new Stream(this.api, hostId, appId, settings, [browserWidth, browserHeight], bootstrapRole.permissions, preserveControllerSession)
         this.startStream(settings)
 
         // Configure input
@@ -455,6 +462,7 @@ class ViewerApp implements Component {
         await new Promise<void>(resolve => {
             let settled = false
             let activeSeen = false
+            let launchPulseSent = false
             const finish = () => {
                 if (settled) return
                 settled = true
@@ -469,6 +477,14 @@ class ViewerApp implements Component {
             }
             const poll = window.setInterval(() => {
                 if (activeGamepad()) {
+                    if (!launchPulseSent) {
+                        // The visible browser state is not enough: send a
+                        // deterministic press/release through the live
+                        // control channel so the host-side XInput gate can
+                        // prove the complete path before starting the EXE.
+                        launchPulseSent = true
+                        this.stream.getInput().pulseControllerForLaunch()
+                    }
                     activeSeen = true
                     status.textContent = "Controller confirmed — release the button to start…"
                     return

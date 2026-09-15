@@ -40,6 +40,7 @@ export class WebRTCTransport implements Transport {
     private lastVideoFrameProgressAt = 0
     private shutdownSignaled = false
     private mediaWatchdogRunning = false
+    private mediaRecoveryEnabled: boolean
 
     private static readonly MEDIA_WATCHDOG_INTERVAL_MS = 2000
     private static readonly MEDIA_STALL_MS = 8000
@@ -54,8 +55,9 @@ export class WebRTCTransport implements Transport {
     private static readonly SEVERE_LOSS_RATIO = 0.12
     private static readonly SEVERE_LOSS_MIN_PACKETS = 100
 
-    constructor(api: Api, configuration: RTCConfiguration, logger?: Logger) {
+    constructor(api: Api, configuration: RTCConfiguration, logger?: Logger, mediaRecoveryEnabled: boolean = true) {
         this.logger = logger
+        this.mediaRecoveryEnabled = mediaRecoveryEnabled
 
         this.api = api
 
@@ -199,7 +201,7 @@ export class WebRTCTransport implements Transport {
     }
 
     private startMediaWatchdog() {
-        if (this.mediaWatchdogTimer != null) {
+        if (!this.mediaRecoveryEnabled || this.mediaWatchdogTimer != null) {
             return
         }
         this.lastMediaProgressAt = Date.now()
