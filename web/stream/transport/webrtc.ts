@@ -45,7 +45,14 @@ export class WebRTCTransport implements Transport {
 
     private static readonly MEDIA_WATCHDOG_INTERVAL_MS = 2000
     private static readonly MEDIA_STALL_MS = 8000
-    private static readonly VIDEO_FRAME_STALL_MS = 4000
+    // DirectX games can briefly stop producing complete desktop-duplication
+    // frames while entering/exiting exclusive fullscreen. BioShock Infinite
+    // takes roughly 9-10 seconds on the Pawpado A10G host; treating that as a
+    // dead transport at four seconds creates a reconnect/mode-switch loop and
+    // leaves the player with audio over a black picture. Packet-total stalls
+    // still recover at 8 seconds; allow a longer grace only when partial RTP
+    // or audio continues but no complete video frame is decoded.
+    private static readonly VIDEO_FRAME_STALL_MS = 15000
     private static readonly SEVERE_LOSS_RATIO = 0.12
     private static readonly SEVERE_LOSS_MIN_PACKETS = 100
     private static readonly DEGRADED_FRAME_RATE_RATIO = 0.85
