@@ -211,6 +211,17 @@ class ViewerApp implements Component {
     private launchStateBaseline: PawpadoLaunchState | null
     private activeDirectLaunchId: string | null = null
 
+    // BioShock Infinite destroys its first window while entering exclusive
+    // fullscreen and can leave desktop duplication without a complete frame
+    // for roughly 9-11 seconds. The WebRTC watchdog deliberately waits 15
+    // seconds before repairing that transition in place, so an 8-second
+    // loading-screen deadline reported a false launch failure before the
+    // recovery path was even allowed to run. Leave enough time for one
+    // watchdog cycle and the repaired frame to arrive while the cover stays
+    // over the desktop.
+    private static readonly DIRECT_GAME_FRAME_TIMEOUT_MS = 35_000
+    private static readonly RECONNECT_FRAME_TIMEOUT_MS = 20_000
+
     private toggleFullscreenWithKeybind: boolean = false
 
     private hasShownFullscreenEscapeWarning = false
@@ -527,8 +538,8 @@ class ViewerApp implements Component {
         return state.updatedAt > this.launchStateBaseline.updatedAt
     }
 
-    private async waitForFreshVideoFrame(): Promise<void> {
-        const deadline = Date.now() + 8_000
+    private async waitForFreshVideoFrame(timeoutMs: number): Promise<void> {
+        const deadline = Date.now() + timeoutMs
         let video: HTMLVideoElement | null = null
         while (Date.now() < deadline) {
             video = document.querySelector("video.video-stream")
@@ -561,7 +572,7 @@ class ViewerApp implements Component {
             const timeout = window.setTimeout(() => {
                 frameVideo.cancelVideoFrameCallback?.(callbackId)
                 reject(new Error("The game opened, but its picture stopped updating."))
-            }, 8_000)
+            }, Math.max(1, deadline - Date.now()))
         })
     }
 
@@ -570,7 +581,7 @@ class ViewerApp implements Component {
         const controllerReady = this.launchOverlay.waitForController(() => this.onUserInteraction())
         try {
             await this.waitForMatchingGameProcess()
-            await this.waitForFreshVideoFrame()
+            await this.waitForFreshVideoFrame(ViewerApp.DIRECT_GAME_FRAME_TIMEOUT_MS)
             await controllerReady
             this.launchOverlay.hide()
         } catch (error) {
@@ -585,7 +596,7 @@ class ViewerApp implements Component {
         if (!this.launchOverlay || this.reconnectOverlayRunning || !this.launchOverlay.isVisible()) return
         this.reconnectOverlayRunning = true
         try {
-            await this.waitForFreshVideoFrame()
+            await this.waitForFreshVideoFrame(ViewerApp.RECONNECT_FRAME_TIMEOUT_MS)
             this.launchOverlay.hide()
         } catch (error) {
             this.launchOverlay.fail(
