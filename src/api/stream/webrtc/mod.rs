@@ -42,6 +42,7 @@ use tokio::{select, spawn};
 use tracing::{Instrument, debug, debug_span, error, info, instrument, warn};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
+
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::ice::udp_network::{EphemeralUDP, UDPNetwork};
@@ -70,6 +71,7 @@ mod control;
 mod convert;
 mod ice_servers;
 mod pacer;
+mod repair;
 mod stream;
 mod video;
 
@@ -326,7 +328,9 @@ pub async fn webrtc_post(
     let ice_servers = generate_ice_servers(&app).await?;
 
     // Interceptor Registry
-    let interceptor_registry = register_default_interceptors(Registry::new(), &mut media_engine)
+    let mut registry = Registry::new();
+    registry.add(Box::new(repair::RepairGuard(session.bitrate)));
+    let interceptor_registry = register_default_interceptors(registry, &mut media_engine)
         .expect("register default interceptors");
 
     let api = APIBuilder::new()
