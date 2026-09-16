@@ -6,10 +6,10 @@ import { chromium, webkit } from "playwright";
 // Exercise the bundled ViewerApp, not just an isolated overlay. Document's
 // fullscreen/remote-input handlers caused the original compatibility-mouse bug.
 const dist = path.resolve("dist");
-for (const scenario of ["mouse-fullscreen", "mouse-pointer-lock", "keyboard", "stalled-cancel", "touch-webkit"]) {
-    const browser = await (scenario === "touch-webkit" ? webkit : chromium).launch();
+for (const scenario of ["mouse-fullscreen", "mouse-pointer-lock", "keyboard", "stalled-cancel", "touch-webkit", "toast-mouse", "toast-touch-webkit"]) {
+    const browser = await (scenario.endsWith("webkit") ? webkit : chromium).launch();
     try {
-        const context = await browser.newContext({ hasTouch: scenario === "touch-webkit" });
+        const context = await browser.newContext({ hasTouch: scenario.includes("touch") });
         const page = await context.newPage();
         let fullscreen = 0, pointerLock = 0, cancellations = 0;
         await page.exposeFunction("reportFullscreen", () => fullscreen++);
@@ -52,11 +52,23 @@ for (const scenario of ["mouse-fullscreen", "mouse-pointer-lock", "keyboard", "s
             window.app.fullscreenOnNextInteractionArmed = scenario !== "mouse-pointer-lock";
             window.app.launchOverlay.fail("Test connection failure", "Cleanup may be unavailable");
         }, scenario);
+        if (scenario.startsWith("toast-")) {
+            await page.evaluate(() => window.dispatchEvent(new ErrorEvent("error", {
+                error: new Error("Synthetic transport error"),
+            })));
+            const toast = page.getByRole("alert").filter({ hasText: "Synthetic transport error" });
+            const dismiss = toast.getByRole("button", { name: "Dismiss" });
+            if (scenario.includes("touch")) await dismiss.tap();
+            else await dismiss.click();
+            await toast.waitFor({ state: "detached" });
+            assert.equal(fullscreen, 0, "dismissing an error must not trigger fullscreen");
+            assert.equal(pointerLock, 0, "dismissing an error must not capture the pointer");
+        }
         const leave = page.getByRole("link", { name: "Back to library" });
         if (scenario === "keyboard") {
             await leave.focus();
             await page.keyboard.press("Enter");
-        } else if (scenario === "touch-webkit") {
+        } else if (scenario.includes("touch")) {
             await leave.tap();
         } else {
             await leave.click();

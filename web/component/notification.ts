@@ -1,9 +1,11 @@
 import { mountNotifications, pushNotification } from "../ui/notifications"
+import { stopPropagationOn } from "./input_boundary"
 
 type NotificationLevel = "error" | "warn" | "info"
 
 const notificationListElement = document.getElementById("notification-list")
 if (notificationListElement) {
+    stopPropagationOn(notificationListElement)
     mountNotifications(notificationListElement)
 }
 
