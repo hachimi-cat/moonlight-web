@@ -1,6 +1,6 @@
 import { ClientInputEvent, ControllerButtons, ControllerCapabilities, ControllerType, KeyAction, KeyModifiers, MouseButton, MouseButtonAction, TouchEventType } from "../uniffi/moonlight_common_bindings"
 import { U16_MAX } from "./buffer"
-import { ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad"
+import { areGamepadStatesEqual, ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, hasReadableStandardShape, mergeGamepadStates, SUPPORTED_BUTTONS } from "./gamepad"
 import { StreamCapabilities } from "./index"
 import { convertToKey, convertToModifiers, emptyKeyModifiers } from "./keyboard"
 import { convertToButton } from "./mouse"
@@ -36,6 +36,13 @@ export type StreamInputConfig = {
     controllerConfig: ControllerConfig
 }
 
+type TrackedGamepad = {
+    gamepadIndex: number
+    gamepadId: string
+    oldState: GamepadState
+    visible: boolean
+}
+
 export function defaultStreamInputConfig(): StreamInputConfig {
     return {
         mouseMode: "follow",
@@ -44,6 +51,7 @@ export function defaultStreamInputConfig(): StreamInputConfig {
         controllerConfig: {
             invertAB: false,
             invertXY: false,
+            multiControllerMode: "auto",
             sendIntervalOverride: null
         }
     }
@@ -109,6 +117,39 @@ export class StreamInput {
         this.streamSize = desktopSize
 
         this.capabilities = capabilities
+
+        // A fallback/reconnect gives us a fresh control stream while the
+        // physical-pad list survives. Re-advertise those local controllers.
+        if (this.config.controllerConfig.multiControllerMode == "single") {
+            const capabilities = navigator.getGamepads().reduce(
+                (merged, gamepad) => this.mergeControllerCapabilities(merged, this.controllerCapabilities(gamepad)),
+                this.emptyControllerCapabilities(),
+            )
+            this.sendControllerAdd(0, SUPPORTED_BUTTONS, capabilities)
+        } else {
+            let advertisedController = false
+            for (let id = 0; id < this.gamepads.length; id++) {
+                if (this.gamepads[id] != null) {
+                    this.sendControllerAdd(id, SUPPORTED_BUTTONS, this.controllerCapabilities(
+                        navigator.getGamepads()[this.gamepads[id]!.gamepadIndex]
+                    ))
+                    advertisedController = true
+                }
+            }
+
+            // Apollo 0.4.6 does not create a ViGEm pad from the controller
+            // mask in /launch. It only does so after ControllerConnect reaches
+            // the live control channel, which is normally delayed until the
+            // browser exposes a physical pad after its first button press.
+            // Advertise the launch-reserved slot immediately so a host-side
+            // launcher can see XInput before it starts scan-once games.
+            if (!advertisedController) {
+                this.sendControllerAdd(0, SUPPORTED_BUTTONS, this.emptyControllerCapabilities())
+                this.placeholderControllerAdvertised = true
+            } else {
+                this.placeholderControllerAdvertised = false
+            }
+        }
         this.registerBufferedControllers()
     }
 
@@ -229,7 +270,13 @@ export class StreamInput {
     }
     onMouseMove(event: MouseEvent, rect: DOMRect) {
         if (this.config.mouseMode == "relative") {
-            this.sendMouseMoveClientCoordinates(event.movementX, event.movementY, rect)
+            // Pointer-lock movement is already a relative device delta. It
+            // must not be multiplied by stream pixels / CSS pixels: that
+            // ratio changes with resolution and DPR (1.5x on a 1440p stream
+            // shown in a 1707px-wide viewport), making the same physical
+            // mouse suddenly much faster at higher quality. Absolute/touch
+            // paths below still need coordinate scaling.
+            this.sendMouseMove(event.movementX, event.movementY)
         } else if (this.config.mouseMode == "follow") {
             this.sendMousePositionClientCoordinates(event.clientX, event.clientY, rect)
         } else if (this.config.mouseMode == "localCursor") {
@@ -247,9 +294,14 @@ export class StreamInput {
     }
 
     sendMouseMove(movementX: number, movementY: number) {
+        const deltaX = Math.max(-32768, Math.min(32767, Math.trunc(movementX)))
+        const deltaY = Math.max(-32768, Math.min(32767, Math.trunc(movementY)))
+        if (deltaX == 0 && deltaY == 0) {
+            return
+        }
         this.controlStream?.send(new ClientInputEvent.MouseMoveRelative({
-            deltaX: movementX,
-            deltaY: movementY,
+            deltaX,
+            deltaY,
         }))
     }
     sendMouseMoveClientCoordinates(movementX: number, movementY: number, rect: DOMRect) {
@@ -883,6 +935,39 @@ export class StreamInput {
         }
     }
 
+    /**
+     * `gamepadconnected` is intentionally gated on a gamepad gesture and can
+     * be missed while a stream page is booting. Polling is cheap (the browser
+     * already snapshots this array) and makes Bluetooth reconnects reliable
+     * without asking the player to reload the stream tab.
+     */
+    private syncVisibleGamepads() {
+        const visible = navigator.getGamepads()
+
+        // Reconcile known slots first. This makes an old index available for
+        // adoption before processing a controller that Chrome has returned at
+        // a new Gamepad API index.
+        for (let id = 0; id < this.gamepads.length; id++) {
+            const entry = this.gamepads[id]
+            if (entry == null) continue
+
+            const gamepad = visible[entry.gamepadIndex]
+            if (gamepad == null) {
+                this.markGamepadUnavailable(id)
+            } else if (!entry.visible) {
+                this.onGamepadConnect(gamepad)
+            }
+        }
+
+        for (const gamepad of visible) {
+            if (gamepad == null) continue
+            const known = this.gamepads.some(entry => entry?.gamepadIndex == gamepad.index)
+            if (!known && !this.bufferedControllers.includes(gamepad.index)) {
+                this.onGamepadConnect(gamepad)
+            }
+        }
+    }
+
     private collectActuators(gamepad: Gamepad): Array<GamepadHapticActuator> {
         const actuators = []
         if ("vibrationActuator" in gamepad && gamepad.vibrationActuator) {
@@ -895,9 +980,57 @@ export class StreamInput {
         return actuators
     }
 
-    // TODO: look at the controller code again
-    private gamepads: Array<{ gamepadIndex: number, oldState: GamepadState } | null> = []
+    /**
+     * Keep Moonlight controller numbers stable for the lifetime of the stream.
+     *
+     * Chrome on Windows can briefly hide a Bluetooth/GameInput controller from
+     * `navigator.getGamepads()` even though it is still connected to Windows.
+     * Removing the host controller on the first missing snapshot makes that
+     * browser quirk a real ViGEm unplug inside the game. Some games then stop
+     * listening to the controller until the next button press exposes it again.
+     *
+     * A missing physical pad is therefore marked unavailable and neutralized,
+     * but its host slot remains reserved. A pad returning at a different
+     * browser index adopts the unavailable slot rather than creating another
+     * virtual Xbox controller.
+     */
+    private gamepads: Array<TrackedGamepad | null> = []
+    private singleControllerState: GamepadState = emptyGamepadState()
     private gamepadRumbleInterval: number | null = null
+    private placeholderControllerAdvertised = false
+
+    private markGamepadUnavailable(id: number) {
+        const entry = this.gamepads[id]
+        if (entry == null || !entry.visible) return
+
+        entry.visible = false
+
+        // Release any button/stick that was held when Chrome hid the pad, but
+        // deliberately do not send ControllerDisconnect. The launch request
+        // asks Apollo to persist controllers, and keeping this slot alive is
+        // what prevents a transient browser dropout from becoming an in-game
+        // device removal.
+        const neutral = emptyGamepadState()
+        if (!areGamepadStatesEqual(entry.oldState, neutral)) {
+            entry.oldState = neutral
+            if (this.connected) this.sendController(id, neutral)
+        }
+    }
+
+    private reusableGamepadSlot(gamepad: Gamepad): number {
+        const visible = navigator.getGamepads()
+        const unavailable = (entry: TrackedGamepad) =>
+            !entry.visible || visible[entry.gamepadIndex] == null
+
+        // Prefer the same physical device if Chrome assigned it a new index,
+        // then fall back to any currently unavailable host slot.
+        const sameDevice = this.gamepads.findIndex(entry =>
+            entry != null && unavailable(entry) && entry.gamepadId == gamepad.id
+        )
+        if (sameDevice != -1) return sameDevice
+
+        return this.gamepads.findIndex(entry => entry != null && unavailable(entry))
+    }
 
     onGamepadConnect(gamepad: Gamepad) {
         if (!this.connected) {
@@ -905,21 +1038,36 @@ export class StreamInput {
             return
         }
 
-        if (this.gamepads.find(value => value?.gamepadIndex == gamepad.index)) {
+        const existingId = this.gamepads.findIndex(value => value?.gamepadIndex == gamepad.index)
+        if (existingId != -1 && this.gamepads[existingId]!.visible) {
             return
         }
 
-        let id = -1
-        for (let i = 0; i < this.gamepads.length; i++) {
-            if (this.gamepads[i] == null) {
-                this.gamepads[i] = { gamepadIndex: gamepad.index, oldState: emptyGamepadState() }
-                id = i
-                break
+        let id = existingId
+        let hostSlotAlreadyExists = id != -1
+        if (id == -1) {
+            id = this.reusableGamepadSlot(gamepad)
+            hostSlotAlreadyExists = id != -1
+
+            if (id == -1) {
+                for (let i = 0; i < this.gamepads.length; i++) {
+                    if (this.gamepads[i] == null) {
+                        id = i
+                        break
+                    }
+                }
             }
         }
         if (id == -1) {
             id = this.gamepads.length
-            this.gamepads.push({ gamepadIndex: gamepad.index, oldState: emptyGamepadState() })
+            this.gamepads.push(null)
+        }
+
+        this.gamepads[id] = {
+            gamepadIndex: gamepad.index,
+            gamepadId: gamepad.id,
+            oldState: emptyGamepadState(),
+            visible: true,
         }
 
         // Start Rumble interval
@@ -927,10 +1075,46 @@ export class StreamInput {
             this.gamepadRumbleInterval = window.setInterval(this.onGamepadRumbleInterval.bind(this), CONTROLLER_RUMBLE_INTERVAL_MS - 10)
         }
 
-        // Reset rumble
-        this.gamepadRumbleCurrent[0] = { lowFrequencyMotor: 0, highFrequencyMotor: 0, leftTrigger: 0, rightTrigger: 0 }
+        // Reset rumble for this browser Gamepad API index. Those indexes are
+        // not guaranteed to match Moonlight's compact local controller ids.
+        this.gamepadRumbleCurrent[gamepad.index] = { lowFrequencyMotor: 0, highFrequencyMotor: 0, leftTrigger: 0, rightTrigger: 0 }
 
-        let capabilities: ControllerCapabilities = {
+        const capabilities = this.controllerCapabilities(gamepad)
+
+        if (this.config.controllerConfig.multiControllerMode == "auto") {
+            if (hostSlotAlreadyExists) {
+                // The persisted host slot is already connected. Reusing it
+                // must not emit another ControllerConnect.
+            } else if (id == 0 && this.placeholderControllerAdvertised) {
+                // Slot 0 already exists on the host. Adopt it instead of
+                // sending a duplicate arrival when the browser finally
+                // reveals the real physical controller.
+                this.placeholderControllerAdvertised = false
+            } else {
+                this.sendControllerAdd(id, SUPPORTED_BUTTONS, capabilities)
+            }
+        }
+
+        if (!hasReadableStandardShape(gamepad)) {
+            console.warn(`[Gamepad]: Unable to read ${gamepad.id}; mapping=${gamepad.mapping}, buttons=${gamepad.buttons.length}, axes=${gamepad.axes.length}`)
+        } else {
+            if (gamepad.mapping != "standard") {
+                console.info(`[Gamepad]: Using Xbox-compatible positional fallback for ${gamepad.id}`)
+            }
+            // Send the event-time snapshot immediately. A browser may expose
+            // a Bluetooth pad on its first short button press and release it
+            // before the next animation frame; waiting would lose that first
+            // state and make the connection look dead.
+            const state = extractGamepadState(gamepad, this.config.controllerConfig)
+            this.gamepads[id]!.oldState = state
+            if (this.config.controllerConfig.multiControllerMode == "auto") {
+                this.sendController(id, state)
+            }
+        }
+    }
+
+    private emptyControllerCapabilities(): ControllerCapabilities {
+        return {
             analogTriggers: false,
             rumble: false,
             triggerRumble: false,
@@ -939,6 +1123,13 @@ export class StreamInput {
             gyro: false,
             batteryState: false,
             rgbLed: false
+        }
+    }
+
+    private controllerCapabilities(gamepad: Gamepad | null): ControllerCapabilities {
+        const capabilities = this.emptyControllerCapabilities()
+        if (!gamepad) {
+            return capabilities
         }
 
         // Rumble capabilities
@@ -964,26 +1155,29 @@ export class StreamInput {
             }
         }
 
-        this.sendControllerAdd(this.gamepads.length - 1, SUPPORTED_BUTTONS, capabilities)
+        return capabilities
+    }
 
-        if (gamepad.mapping != "standard") {
-            console.warn(`[Gamepad]: Unable to read values of gamepad with mapping ${gamepad.mapping}`)
+    private mergeControllerCapabilities(
+        target: ControllerCapabilities,
+        source: ControllerCapabilities,
+    ): ControllerCapabilities {
+        for (const capability of Object.keys(target) as Array<keyof ControllerCapabilities>) {
+            target[capability] ||= source[capability]
         }
+        return target
     }
     onGamepadDisconnect(event: GamepadEvent) {
         const index = this.gamepads.findIndex(value => value?.gamepadIndex == event.gamepad.index)
         if (index != -1) {
-            const id = this.gamepads[index]?.gamepadIndex
-            if (id != null) {
-                this.sendControllerRemove(id)
-            }
-
-            this.gamepads[index] = null
+            this.markGamepadUnavailable(index)
         }
     }
 
     private lastGamepadUpdate: number = performance.now()
     onGamepadUpdate() {
+        this.syncVisibleGamepads()
+
         if (this.config.controllerConfig.sendIntervalOverride != null) {
             const now = performance.now()
             if (now - this.lastGamepadUpdate < (1000 / this.config.controllerConfig.sendIntervalOverride)) {
@@ -992,22 +1186,40 @@ export class StreamInput {
             this.lastGamepadUpdate = performance.now()
         }
 
+        if (this.config.controllerConfig.multiControllerMode == "single") {
+            const states: GamepadState[] = []
+            for (const entry of this.gamepads) {
+                if (!entry) continue
+                const gamepad = navigator.getGamepads()[entry.gamepadIndex]
+                if (gamepad && hasReadableStandardShape(gamepad)) {
+                    states.push(extractGamepadState(gamepad, this.config.controllerConfig))
+                }
+            }
+
+            const state = mergeGamepadStates(states)
+            if (!areGamepadStatesEqual(state, this.singleControllerState)) {
+                this.singleControllerState = state
+                this.sendController(0, state)
+            }
+            return
+        }
+
         for (let gamepadId = 0; gamepadId < this.gamepads.length; gamepadId++) {
             const oldGamepadState = this.gamepads[gamepadId]
             if (oldGamepadState == null) {
-                return
+                continue
             }
             const gamepad = navigator.getGamepads()[oldGamepadState.gamepadIndex]
             if (!gamepad) {
                 continue
             }
 
-            if (gamepad.mapping != "standard") {
+            if (!hasReadableStandardShape(gamepad)) {
                 continue
             }
 
             const state = extractGamepadState(gamepad, this.config.controllerConfig)
-            if (state == oldGamepadState.oldState) {
+            if (areGamepadStatesEqual(state, oldGamepadState.oldState)) {
                 continue
             }
             oldGamepadState.oldState = state
@@ -1031,25 +1243,29 @@ export class StreamInput {
             const lowFrequencyMotor = this.buffer.getU16() / U16_MAX
             const highFrequencyMotor = this.buffer.getU16() / U16_MAX
 
-            const gamepadIndex = this.gamepads[id]?.gamepadIndex
-            if (gamepadIndex == null) {
-                return
+            const gamepadIndexes = this.gamepadIndexesForController(id)
+            for (const gamepadIndex of gamepadIndexes) {
+                this.setGamepadEffect(gamepadIndex, "dual-rumble", { lowFrequencyMotor, highFrequencyMotor })
             }
-
-            this.setGamepadEffect(gamepadIndex, "dual-rumble", { lowFrequencyMotor, highFrequencyMotor })
         } else if (ty == 1) {
             // Trigger Rumble
             const id = this.buffer.getU8()
             const leftTrigger = this.buffer.getU16() / U16_MAX
             const rightTrigger = this.buffer.getU16() / U16_MAX
 
-            const gamepadIndex = this.gamepads[id]?.gamepadIndex
-            if (gamepadIndex == null) {
-                return
+            const gamepadIndexes = this.gamepadIndexesForController(id)
+            for (const gamepadIndex of gamepadIndexes) {
+                this.setGamepadEffect(gamepadIndex, "trigger-rumble", { leftTrigger, rightTrigger })
             }
-
-            this.setGamepadEffect(gamepadIndex, "trigger-rumble", { leftTrigger, rightTrigger })
         }
+    }
+
+    private gamepadIndexesForController(id: number): number[] {
+        if (this.config.controllerConfig.multiControllerMode == "single" && id == 0) {
+            return this.gamepads.flatMap(gamepad => gamepad ? [gamepad.gamepadIndex] : [])
+        }
+        const gamepadIndex = this.gamepads[id]?.gamepadIndex
+        return gamepadIndex == null ? [] : [gamepadIndex]
     }
 
     // -- Controller rumble
@@ -1153,6 +1369,19 @@ export class StreamInput {
         this.controlStream?.send(new ClientInputEvent.ControllerDisconnect({
             controllerNumber: id,
         }))
+    }
+    /**
+     * Release a host-side game launcher that is intentionally waiting for an
+     * end-to-end controller event. The game is still stopped while both
+     * packets are sent, so this cannot become an in-game A press.
+     */
+    pulseControllerForLaunch() {
+        if (!this.connected) return
+
+        const pressed = emptyGamepadState()
+        pressed.buttonFlags.a = true
+        this.sendController(0, pressed)
+        window.setTimeout(() => this.sendController(0, emptyGamepadState()), 120)
     }
     // Values
     // - Trigger: range 0..1

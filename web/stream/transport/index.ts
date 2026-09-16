@@ -14,7 +14,9 @@ export type TransportAudioType = "audiotrack" // TrackTransportChannel
 // failednoconnect => a connection failed without firstly being established
 // failed => a connection was ungracefully closed
 // disconnect => a connection was gracefully closed
-export type TransportShutdown = "failednoconnect" | "failed" | "disconnect"
+// degraded => severe RTP loss; reconnect at a safer bitrate
+// stalled => ICE is connected but media packet counters stopped advancing
+export type TransportShutdown = "failednoconnect" | "failed" | "disconnect" | "degraded" | "stalled"
 
 export type TransportOptions = {
     appId: number,
@@ -24,6 +26,12 @@ export type TransportOptions = {
     bitrate: number,
     hdr: boolean,
     localAudioPlayMode: boolean,
+    gamepadsAttached: number,
+    gamepadsPersistAfterDisconnect: boolean,
+    /** Resume the same Apollo app only for another transport attempt made by
+     *  this page. A newly opened page requests a fresh launch so changed
+     *  resolution/FPS settings cannot inherit an old host session. */
+    resumeCurrentApp: boolean,
     /// These are the available video codecs when using data transport
     supportedCodecs: VideoFormats,
     preferredCodecs?: VideoFormats,

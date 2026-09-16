@@ -35,6 +35,8 @@ const trueDefaultSettings: Settings =
     "controllerConfig": {
         "invertAB": false,
         "invertXY": false,
+        // possible values: "auto", "single"
+        "multiControllerMode": "auto",
         // possible values: null or a number, example: 60, 120
         "sendIntervalOverride": null
     },

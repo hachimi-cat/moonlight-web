@@ -84,6 +84,11 @@ export class AudioDecoderPipe implements DataAudioPlayer {
             console.debug("Cannot submit audio decode unit because the stream errored")
             return
         }
+        // Audio frames outlive cleanup() the same way video ones do, and
+        // decode() on a closed AudioDecoder throws InvalidStateError.
+        if (this.decoder.state == "closed") {
+            return
+        }
 
         const chunk = new EncodedAudioChunk({
             type: this.isFirstPacket ? "key" : "delta",

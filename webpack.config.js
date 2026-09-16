@@ -26,8 +26,19 @@ export default {
                 use: "ts-loader",
                 exclude: /node_modules/,
             },
+            // Tailwind for the React islands. Injected EAGERLY (plain
+            // style-loader), unlike the lazy sheets below: the vanilla UI
+            // toggles its themes by calling .use()/.unuse() on a lazy tag,
+            // but utility classes have to be present the moment a component
+            // renders. Must be matched before the general .css rule, and
+            // that rule excludes .tw.css so the two don't both apply.
+            {
+                test: /\.tw\.css$/i,
+                use: ['style-loader', 'css-loader', 'postcss-loader']
+            },
             {
                 test: /\.css$/i,
+                exclude: /\.tw\.css$/i,
                 use: [
                     {
                         loader: 'style-loader',
@@ -73,11 +84,18 @@ export default {
                     from: "./web/manifest.json",
                     to: "manifest.json"
                 },
+                {
+                    // All three HTML pages link this favicon by relative
+                    // path; it must exist at a stable name, not a hashed
+                    // asset module.
+                    from: "./web/resources/moonlight.svg",
+                    to: "resources/moonlight.svg"
+                },
             ],
         }),
     ],
     resolve: {
-        extensions: [".ts", ".js"]
+        extensions: [".tsx", ".ts", ".js"]
     },
     output: {
         filename: "[name].js",
