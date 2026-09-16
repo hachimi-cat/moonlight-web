@@ -12,7 +12,7 @@ export class WebRTCTransport implements Transport {
 
     readonly implementationName: string = "webrtc"
 
-    readonly controlStream = new WebRtcControlStream()
+    readonly controlStream: WebRtcControlStream
     onconnect: ((connectData: TransportConnectData) => void) | null = null
     onclose: ((shutdown: TransportShutdown) => void) | null = null
 
@@ -55,6 +55,7 @@ export class WebRTCTransport implements Transport {
     constructor(api: Api, configuration: RTCConfiguration, logger?: Logger, preserveMoonlightSession: boolean = false) {
         this.logger = logger
         this.preserveMoonlightSession = preserveMoonlightSession
+        this.controlStream = new WebRtcControlStream(logger)
 
         this.api = api
 
@@ -530,6 +531,7 @@ export class WebRTCTransport implements Transport {
 
     async close(): Promise<void> {
         this.stopMediaWatchdog()
+        this.controlStream.setChannel(null)
 
         // Close the peer
         this.peer.close()
@@ -647,6 +649,7 @@ class WebRtcControlStream implements IControlStream {
     // Enet control stream
     private controlStream: ControlStream | null = null
     private controlStreamPollTimeout: number | null = null
+    private controlReconnectTimer: number | null = null
     private enetConnected = false
 
     private packetBuffer: Array<ControlPacket> = []
@@ -659,6 +662,9 @@ class WebRtcControlStream implements IControlStream {
     setChannel(channel: null): void
     setChannel(channel: RTCDataChannel, streamType: "simple" | "enet", config: ControlPacketConfig): void
     setChannel(channel: RTCDataChannel | null, streamType?: "simple" | "enet", config?: ControlPacketConfig): void {
+        // Detach from the old channel before replacing/nulling the reference.
+        this.channel?.removeEventListener("open", this.boundChannelStateChange)
+        this.channel?.removeEventListener("message", this.boundMessage)
         this.channel = channel
 
         // Clean up old control stream if present
@@ -668,6 +674,11 @@ class WebRtcControlStream implements IControlStream {
         }
         if (this.controlStreamPollTimeout != null) {
             globalObject().clearTimeout(this.controlStreamPollTimeout)
+            this.controlStreamPollTimeout = null
+        }
+        if (this.controlReconnectTimer != null) {
+            globalObject().clearTimeout(this.controlReconnectTimer)
+            this.controlReconnectTimer = null
         }
         this.enetConnected = false
 
@@ -691,8 +702,7 @@ class WebRtcControlStream implements IControlStream {
             this.trySendBufferedPackets()
         } else {
             this.streamType = "simple"
-            this.channel?.removeEventListener("open", this.boundChannelStateChange)
-            this.channel?.removeEventListener("message", this.boundMessage)
+            this.packetBuffer = []
         }
     }
 
@@ -715,13 +725,12 @@ class WebRtcControlStream implements IControlStream {
                 throw "dropping packet because enet control stream is not initialized"
             }
 
-            this.controlStream.handleReceive(
-                uniffiNow(),
-                ENET_IP,
-                event.data
-            )
-
-            this.controlStreamPollOutput(false)
+            try {
+                this.controlStream.handleReceive(uniffiNow(), ENET_IP, event.data)
+                this.controlStreamPollOutput(false)
+            } catch (error) {
+                this.scheduleControlReconnect(error)
+            }
         } else {
             this.logger?.debug("failed to deserialize packet")
             console.debug("failed to deserialize packet", event.data)
@@ -768,6 +777,8 @@ class WebRtcControlStream implements IControlStream {
             !this.channel || this.channel.readyState != "open" ||
             (this.streamType == "enet" && (!this.controlStream || !this.enetConnected))
         ) {
+            // A broken control path must not accumulate minutes of old input.
+            if (this.packetBuffer.length >= 256) this.packetBuffer.shift()
             this.packetBuffer.push(packet)
             return
         }
@@ -796,6 +807,7 @@ class WebRtcControlStream implements IControlStream {
                     this.lastChannelSendFailureAt = now
                     this.logger?.debug(`control stream temporarily unwritable: ${error}`)
                 }
+                this.scheduleControlReconnect(error)
                 return
             }
             this.controlStreamPollOutput()
@@ -816,12 +828,39 @@ class WebRtcControlStream implements IControlStream {
 
     private boundPollOutput = this.controlStreamPollOutput.bind(this)
     private controlStreamPollOutput(handleInput = true) {
+        try {
+            this.pollControlStream(handleInput)
+        } catch (error) {
+            // The UniFFI protocol may throw NotConnected on timeout before
+            // publishing Disconnect. Never let that kill the timer pump.
+            this.scheduleControlReconnect(error)
+        }
+    }
+
+    private scheduleControlReconnect(reason: unknown) {
+        if (this.controlReconnectTimer != null || this.streamType !== "enet"
+            || !this.config || this.channel?.readyState !== "open") return
+        this.enetConnected = false
+        if (this.controlStreamPollTimeout != null) {
+            globalObject().clearTimeout(this.controlStreamPollTimeout)
+            this.controlStreamPollTimeout = null
+        }
+        this.logger?.debug(`repairing browser control protocol on the existing data channel: ${reason}`)
+        this.controlReconnectTimer = globalObject().setTimeout(() => {
+            this.controlReconnectTimer = null
+            if (this.channel?.readyState === "open" && this.config) {
+                this.setChannel(this.channel, "enet", this.config)
+            }
+        }, 250)
+    }
+
+    private pollControlStream(handleInput = true) {
         if (this.controlStreamPollTimeout != null) {
             globalObject().clearTimeout(this.controlStreamPollTimeout)
         }
         this.controlStreamPollTimeout = null
 
-        if (!this.controlStream) {
+        if (!this.controlStream || this.controlReconnectTimer != null) {
             return
         }
         if (!this.channel) {
@@ -857,14 +896,10 @@ class WebRtcControlStream implements IControlStream {
                     this.onreceive(event.inner[0]);
                 }
             } else if (event.tag === ControlStreamEvent_Tags.Disconnect) {
-                this.logger?.debug("control stream got disconnected for an unknown reason, constructing with new client control stream")
-                this.enetConnected = false
-
-                if (this.config) {
-                    this.setChannel(this.channel, "enet", this.config)
-                } else {
-                    this.logger?.debug("failed to reconstruct new client control stream because of missing packet config")
-                }
+                // Do not recursively replace the protocol inside its event
+                // loop: the outer pump would then reschedule a second timer.
+                this.scheduleControlReconnect("disconnect")
+                return
             }
         }
 

@@ -2,7 +2,7 @@
 
 rust:
   repo: https://github.com/hachimi-cat/moonlight-common-rust.git
-  branch: 842b40e7e8624720ca16705585b44106a7401f21
+  branch: de4d35fa68215b8564d51053e9ca6e09329796fc
   manifestPath: bindings/Cargo.toml
 
 web:
