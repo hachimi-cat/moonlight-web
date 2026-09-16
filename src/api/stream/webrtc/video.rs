@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     mem::swap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -9,13 +12,16 @@ use bytes::Bytes;
 use moonlight_common::{
     stream::{
         proto::video::frame::OwnedVideoFrame,
-        video::{VideoFormat, VideoFormats, VideoSetup},
+        video::{FrameType, VideoFormat, VideoFormats, VideoSetup},
     },
     webrtc::sdp::Session,
 };
 use tokio::{
     select, spawn,
-    sync::mpsc::{UnboundedSender, unbounded_channel},
+    sync::{
+        Notify,
+        mpsc::{Sender, channel},
+    },
 };
 use tracing::{Instrument, debug, debug_span, info, warn};
 use webrtc::{
@@ -44,7 +50,13 @@ use webrtc::{
     track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
 };
 
+use super::pacer::{FrameDecision, FrameGate, VideoPacer};
 use crate::app::AppError;
+
+struct QueuedFrame {
+    frame: OwnedVideoFrame,
+    received_at: Instant,
+}
 
 pub enum VideoChannelEvent {
     SignalIdr,
@@ -56,7 +68,9 @@ enum State {
     Sending {
         rtcp_buffer: Vec<u8>,
         rtcp_receiver: Arc<RTCRtpSender>,
-        frame_sender: UnboundedSender<OwnedVideoFrame>,
+        frame_sender: Sender<QueuedFrame>,
+        overflowed: Arc<AtomicBool>,
+        request_idr: Arc<Notify>,
     },
 }
 
@@ -83,6 +97,7 @@ impl VideoChannel {
         &mut self,
         setup: VideoSetup,
         peer: &RTCPeerConnection,
+        bitrate_kbps: u32,
     ) -> Result<(), AppError> {
         let mut new_state = State::Panic;
         swap(&mut new_state, &mut self.state);
@@ -111,12 +126,16 @@ impl VideoChannel {
             Box::new(Av1Payloader::default()) as Box<dyn Payloader + Send + Sync>
         };
 
-        let (frame_sender, mut frame_receiver) = unbounded_channel();
+        let (frame_sender, mut frame_receiver) = channel::<QueuedFrame>(8);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let request_idr = Arc::new(Notify::new());
 
         self.state = State::Sending {
             rtcp_buffer: vec![0u8; 1500],
             rtcp_receiver: video_sender,
             frame_sender,
+            overflowed: overflowed.clone(),
+            request_idr: request_idr.clone(),
         };
 
         spawn(
@@ -125,9 +144,29 @@ impl VideoChannel {
                 let mut binding_was_paused = false;
                 let mut next_send_warning_at = Instant::now();
                 let mut suppressed_send_failures = 0u64;
+                let mut pacer = VideoPacer::new(bitrate_kbps, Instant::now());
+                let mut frame_gate = FrameGate::default();
 
-                while let Some(frame) = frame_receiver.recv().await {
-                    let frame = frame.as_ref();
+                while let Some(queued) = frame_receiver.recv().await {
+                    let frame = queued.frame.as_ref();
+                    let decision = frame_gate.inspect(
+                        overflowed.swap(false, Ordering::Relaxed),
+                        queued.received_at.elapsed(),
+                        frame.parsed_frame_type == FrameType::Idr,
+                    );
+                    if decision == FrameDecision::Resync {
+                        // Never build seconds of picture/input latency. Once a
+                        // delta is discarded its dependents are unusable too:
+                        // clear stale work and resume only at a fresh keyframe.
+                        while frame_receiver.try_recv().is_ok() {}
+                        pacer = VideoPacer::new(bitrate_kbps, Instant::now());
+                        request_idr.notify_one();
+                        warn!("video relay fell behind; discard stale frames and request keyframe");
+                        continue;
+                    }
+                    if decision == FrameDecision::Drop {
+                        continue;
+                    }
 
                     // Micros, not millis: at a 90kHz clock a millisecond is
                     // 90 ticks, so ms truncation quantizes every frame's
@@ -168,6 +207,10 @@ impl VideoChannel {
 
                     let len = payloads.len();
                     for (i, payload) in payloads.into_iter().enumerate() {
+                        // Include IPv4/UDP/RTP/SRTP/extensions in the budget.
+                        if let Some(deadline) = pacer.deadline(payload.len() + 64, Instant::now()) {
+                            tokio::time::sleep_until(deadline.into()).await;
+                        }
                         sequence_number = sequence_number.wrapping_add(1);
 
                         if let Err(err) = track
@@ -229,8 +272,20 @@ impl VideoChannel {
             State::SelectVideoFormat | State::Panic => {
                 panic!("VideoChannel is in an invalid state")
             }
-            State::Sending { frame_sender, .. } => {
-                let _ = frame_sender.send(frame);
+            State::Sending {
+                frame_sender,
+                overflowed,
+                ..
+            } => {
+                if frame_sender
+                    .try_send(QueuedFrame {
+                        frame,
+                        received_at: Instant::now(),
+                    })
+                    .is_err()
+                {
+                    overflowed.store(true, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -240,6 +295,7 @@ impl VideoChannel {
             let State::Sending {
                 rtcp_buffer,
                 rtcp_receiver,
+                request_idr,
                 ..
             } = &mut self.state
             else {
@@ -247,6 +303,7 @@ impl VideoChannel {
             };
 
             select! {
+                _ = request_idr.notified() => return Ok(VideoChannelEvent::SignalIdr),
                 // This function seems cancel safe
                 result = rtcp_receiver.read(rtcp_buffer) => {
                     let Ok((packets, _)) = result else {

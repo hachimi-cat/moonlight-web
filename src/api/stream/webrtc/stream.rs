@@ -12,7 +12,7 @@ use moonlight_common::stream::{
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::{select, time::timeout};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use webrtc::peer_connection::{RTCPeerConnection, peer_connection_state::RTCPeerConnectionState};
 
 use crate::{
@@ -181,11 +181,11 @@ pub async fn webrtc_loop(
                 match event {
                     ControlChannelEvent::Active => {
                         control_channel_active = true;
-                        debug!("control channel active");
+                        info!("browser control channel active; media forwarding enabled");
                     },
                     ControlChannelEvent::Inactive => {
                         control_channel_active = false;
-                        debug!("control channel inactive");
+                        warn!("browser control channel inactive; media forwarding paused");
                     },
                     ControlChannelEvent::Packet(packet) => {
                         if let Err(err) = stream.send_raw(packet) {

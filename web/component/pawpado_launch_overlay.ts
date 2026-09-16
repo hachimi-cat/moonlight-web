@@ -1,3 +1,5 @@
+import { stopPropagationOn } from "./input_boundary"
+
 export type PawpadoGamePresentation = {
     slug: string
     title: string
@@ -162,9 +164,7 @@ export class PawpadoLaunchOverlay {
 
         // Stream input handlers sit on document and aggressively prevent
         // defaults. Keep overlay taps/buttons local and usable on mobile.
-        for (const name of ["pointerdown", "pointerup", "touchstart", "touchmove", "touchend", "click"]) {
-            this.root.addEventListener(name, event => event.stopPropagation(), { passive: name != "touchend" })
-        }
+        stopPropagationOn(this.root)
     }
 
     mount(parent: HTMLElement) {

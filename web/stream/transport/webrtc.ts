@@ -590,7 +590,6 @@ export class WebRTCTransport implements Transport {
         const stats = await this.peer.getStats()
 
         for (const [_key, value] of stats) {
-            console.debug(value)
 
             // Video Stream
             if ("type" in value && "kind" in value
@@ -764,7 +763,6 @@ class WebRtcControlStream implements IControlStream {
     }
 
     sendRaw(packet: ControlPacket): void {
-        console.debug(packet, "sending control packet")
 
         if (
             !this.channel || this.channel.readyState != "open" ||
@@ -781,7 +779,6 @@ class WebRtcControlStream implements IControlStream {
 
         if (this.streamType == "simple") {
             const data = controlPacketSerialize(this.config, packet)
-            console.debug(data, "sending control data")
             // Same closed-channel guard as controlStreamPollOutput.
             if (data && this.channel.readyState == "open") {
                 this.sendChannelData(data)
@@ -846,7 +843,6 @@ class WebRtcControlStream implements IControlStream {
 
         let send: UdpTransmit | undefined
         while (send = this.controlStream.pollPacket()) {
-            console.debug(send.contents, "enet send")
             this.sendChannelData(send.contents)
         }
 

@@ -58,6 +58,8 @@ mirror-windows:
     # Build exactly what the GitHub pipeline built for this target.
     - npm ci
     - npm run build
+    - npx playwright install --with-deps chromium webkit >/dev/null
+    - npm run test:stream-ui
     - cargo build --release --target x86_64-pc-windows-gnu
     # Package layout stream-client sync expects: package/web-server.exe +
     # package/static/** and NOTHING else — a package/server/ entry would

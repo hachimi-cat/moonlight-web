@@ -20,6 +20,7 @@ import { InfoEvent, Stream, StreamCapabilities } from "./stream/index"
 import { ConnectionInfoModal } from "./component/connection_info_modal"
 import { wait } from "./util"
 import { PawpadoLaunchOverlay, parsePawpadoGamePresentation } from "./component/pawpado_launch_overlay"
+import { stopPropagationOn } from "./component/input_boundary"
 
 let I = getTranslations(getCurrentLanguage())
 
@@ -113,8 +114,9 @@ async function startApp() {
             }
         }
     }
-    // TODO: check for prod or dev env
-    uniffiSetLogger(new CustomUniffiLogger(), LogLevel.Debug)
+    // Protocol debug logging includes every controller/mouse packet. Keep
+    // the normal streaming hot path free of console/WASM log allocations.
+    uniffiSetLogger(new CustomUniffiLogger(), LogLevel.Info)
 
     // Start and Mount App
     const app = new ViewerApp(api, hostId, appId, bootstrapRole.role, parseSettingsFromQuery(queryParams), launchOverlay, launchStateBaseline)
@@ -812,7 +814,6 @@ class ViewerApp implements Component {
     onKeyDown(event: KeyboardEvent) {
         this.onUserInteraction()
 
-        console.debug(event)
         if (event.shiftKey && event.ctrlKey && event.code == "KeyV") {
             // We are likely pasting -> don't send keys
         } else if (event.code == "F11") {
@@ -1577,24 +1578,4 @@ class SendKeycodeModal extends FormModal<number> {
 
         return parseInt(keyString)
     }
-}
-
-// Stop propagation so the stream doesn't get it
-function stopPropagationOn(element: HTMLElement) {
-    element.addEventListener("keydown", onStopPropagation)
-    element.addEventListener("keyup", onStopPropagation)
-    element.addEventListener("keypress", onStopPropagation)
-    element.addEventListener("click", onStopPropagation)
-    element.addEventListener("mousedown", onStopPropagation)
-    element.addEventListener("mouseup", onStopPropagation)
-    element.addEventListener("mousemove", onStopPropagation)
-    element.addEventListener("wheel", onStopPropagation)
-    element.addEventListener("contextmenu", onStopPropagation)
-    element.addEventListener("touchstart", onStopPropagation)
-    element.addEventListener("touchmove", onStopPropagation)
-    element.addEventListener("touchend", onStopPropagation)
-    element.addEventListener("touchcancel", onStopPropagation)
-}
-function onStopPropagation(event: Event) {
-    event.stopPropagation()
 }

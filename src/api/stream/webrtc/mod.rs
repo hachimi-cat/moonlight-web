@@ -69,6 +69,7 @@ mod audio;
 mod control;
 mod convert;
 mod ice_servers;
+mod pacer;
 mod stream;
 mod video;
 
@@ -469,7 +470,7 @@ pub async fn webrtc_post(
         }
     };
     if let Err(err) = video_channel
-        .on_video_format_selected(moonlight_stream.video_setup(), &peer)
+        .on_video_format_selected(moonlight_stream.video_setup(), &peer, session.bitrate)
         .await
     {
         error!(error = %err, "failed to add video track to webrtc peer");
