@@ -11,6 +11,10 @@ pub(super) struct VideoPacer {
 }
 
 const QUANTUM: Duration = Duration::from_millis(1);
+// Tokio/Windows sleeps can wake 1–2 ms after their deadline. Preserve
+// that small scheduling credit or a nominal 40-Mbit/s stream is throttled
+// below its encoded rate and continually builds a stale-frame queue.
+const MAX_CATCH_UP: Duration = Duration::from_millis(3);
 
 impl VideoPacer {
     pub fn new(bitrate_kbps: u32, now: Instant) -> Self {
@@ -33,8 +37,9 @@ impl VideoPacer {
             self.batch_bytes = 0;
         }
         // Idle time or a late Windows timer is not permission to dump a
-        // backlog at line rate. At most one small batch of catch-up credit.
-        self.next_batch = self.next_batch.max(now - QUANTUM);
+        // backlog at line rate. Permit only a few milliseconds of credit,
+        // enough for Windows timer overshoot, never a complete frame burst.
+        self.next_batch = self.next_batch.max(now - MAX_CATCH_UP);
         self.batch_bytes += wire_bytes;
         (self.next_batch > now).then_some(self.next_batch)
     }
@@ -68,7 +73,35 @@ mod tests {
             immediate += 1;
             assert!(immediate < 30);
         }
-        assert!(immediate <= 8, "at most two small batches after a stall");
+        assert!(immediate <= 16, "at most four small batches after a stall");
+    }
+
+    #[test]
+    fn windows_timer_overshoot_does_not_throttle_sustained_video() {
+        for bitrate in [40_000u32, 64_000] {
+            let start = Instant::now();
+            let mut now = start;
+            let mut pacer = VideoPacer::new(bitrate, start);
+            let wire_bytes_per_frame = (bitrate as usize * 1000 / 8 / 60) * 1258 / 1194;
+            let mut max_lag = Duration::ZERO;
+            for frame in 0..360u32 {
+                let produced = start + Duration::from_secs_f64(f64::from(frame) / 60.0);
+                now = now.max(produced);
+                let mut remaining = wire_bytes_per_frame;
+                while remaining > 0 {
+                    let packet = remaining.min(1258);
+                    remaining -= packet;
+                    if let Some(deadline) = pacer.deadline(packet, now) {
+                        now = deadline + Duration::from_millis(2);
+                    }
+                }
+                max_lag = max_lag.max(now.duration_since(produced));
+            }
+            assert!(
+                max_lag < Duration::from_millis(30),
+                "{bitrate} kbps accumulated {max_lag:?}"
+            );
+        }
     }
 }
 
