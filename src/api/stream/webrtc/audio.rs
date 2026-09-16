@@ -71,6 +71,7 @@ impl AudioChannel {
                 let mut binding_was_paused = false;
                 let mut next_send_warning_at = Instant::now();
                 let mut suppressed_send_failures = 0u64;
+                let mut sent_first_frame = false;
 
                 while let Some(frame) = frame_receiver.recv().await {
                     // 48kHz clock; micros keep 5ms Opus frames from being
@@ -130,6 +131,9 @@ impl AudioChannel {
                         } else {
                             suppressed_send_failures += 1;
                         }
+                    } else if !sent_first_frame {
+                        info!("sent first browser audio packet");
+                        sent_first_frame = true;
                     }
                 }
             }
