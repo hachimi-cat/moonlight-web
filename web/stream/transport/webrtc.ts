@@ -38,6 +38,7 @@ export class WebRTCTransport implements Transport {
     private lastVideoLost: number | null = null
     private lastVideoFramesDecoded: number | null = null
     private lastVideoFrameProgressAt = 0
+    private consecutiveSevereLossSamples = 0
     private shutdownSignaled = false
     private mediaWatchdogRunning = false
     private preserveMoonlightSession: boolean
@@ -55,6 +56,7 @@ export class WebRTCTransport implements Transport {
     private static readonly VIDEO_FRAME_STALL_MS = 15000
     private static readonly SEVERE_LOSS_RATIO = 0.12
     private static readonly SEVERE_LOSS_MIN_PACKETS = 100
+    private static readonly SEVERE_LOSS_CONFIRMATION_SAMPLES = 2
 
     constructor(api: Api, configuration: RTCConfiguration, logger?: Logger, preserveMoonlightSession: boolean = false) {
         this.logger = logger
@@ -261,12 +263,19 @@ export class WebRTCTransport implements Transport {
                 const lost = Math.max(0, videoLost - this.lastVideoLost)
                 const total = received + lost
                 const lossRatio = lost / Math.max(1, total)
-                if (total >= WebRTCTransport.SEVERE_LOSS_MIN_PACKETS
+                const severe = total >= WebRTCTransport.SEVERE_LOSS_MIN_PACKETS
                     && lossRatio >= WebRTCTransport.SEVERE_LOSS_RATIO
+                this.consecutiveSevereLossSamples = severe
+                    ? this.consecutiveSevereLossSamples + 1
+                    : 0
+                if (this.consecutiveSevereLossSamples
+                    >= WebRTCTransport.SEVERE_LOSS_CONFIRMATION_SAMPLES
                 ) {
                     this.logger?.debug(
-                        `WebRTC media degraded (${(lossRatio * 100).toFixed(1)}% video packet loss); reconnecting`,
+                        `WebRTC media degraded for ${this.consecutiveSevereLossSamples} checks ` +
+                        `(${(lossRatio * 100).toFixed(1)}% video packet loss); reconnecting`,
                     )
+                    this.consecutiveSevereLossSamples = 0
                     await this.closeForRecovery("degraded")
                     return
                 }
@@ -400,6 +409,7 @@ export class WebRTCTransport implements Transport {
             this.lastVideoLost = null
             this.lastVideoFramesDecoded = null
             this.lastVideoFrameProgressAt = now
+            this.consecutiveSevereLossSamples = 0
             this.logger?.debug(
                 "WebRTC ICE restart completed; controller session preserved",
                 { type: "recover" },
@@ -594,10 +604,16 @@ export class WebRTCTransport implements Transport {
         const out: Record<string, StatValue> = {}
 
         // Control Stream
-        const estimatedRtt = this.controlStream.estimatedRtt()
-        if (estimatedRtt) {
-            out.estimatedClientToRelayRttMs = estimatedRtt.rtt
-            out.estimatedClientToRelayRttVarianceMs = estimatedRtt.rttVariance
+        try {
+            const estimatedRtt = this.controlStream.estimatedRtt()
+            if (estimatedRtt) {
+                out.estimatedClientToRelayRttMs = estimatedRtt.rtt
+                out.estimatedClientToRelayRttVarianceMs = estimatedRtt.rttVariance
+            }
+        } catch (error) {
+            // Stats are observational. A transient ENet error during an ICE
+            // restart must not become an unhandled notification over the game.
+            this.logger?.debug(`control RTT temporarily unavailable: ${error}`)
         }
 
         const stats = await this.peer.getStats()
@@ -800,7 +816,20 @@ class WebRtcControlStream implements IControlStream {
                 this.sendChannelData(data)
             }
         } else if (this.streamType == "enet") {
-            this.controlStream?.sendRaw(packet)
+            // The ENet WASM layer can reject input while ICE is restarting
+            // even though the RTCDataChannel still reports `open`. Treat it
+            // like the adjacent channel.send failure instead of surfacing an
+            // uncaught ControlStreamError for every mouse/gamepad packet.
+            try {
+                this.controlStream?.sendRaw(packet)
+            } catch (error) {
+                const now = Date.now()
+                if (now - this.lastChannelSendFailureAt >= 5000) {
+                    this.lastChannelSendFailureAt = now
+                    this.logger?.debug(`control stream temporarily unwritable: ${error}`)
+                }
+                return
+            }
             this.controlStreamPollOutput()
         } else {
             this.logger?.debug(`failed to send control packet ${JSON.stringify(packet)}`)

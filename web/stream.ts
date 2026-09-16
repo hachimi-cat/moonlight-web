@@ -608,15 +608,17 @@ class ViewerApp implements Component {
         }
     }
 
-    private async cancelAndReturnToLibrary() {
+    private cancelAndReturnToLibrary() {
         this.pageExitHandled = true
-        try {
-            await apiHostCancel(this.api, { host_id: this.hostId })
-        } catch { }
-        window.close()
-        window.setTimeout(() => {
-            if (!document.hidden) window.location.assign("/dashboard/games")
-        }, 120)
+        // Navigation cannot wait up to the API's 12-second timeout: doing so
+        // loses the trusted click needed by window.close() and made the button
+        // appear dead during a broken stream. Dispatch cleanup with unload
+        // semantics; the overlay's native link owns the actual navigation.
+        void apiHostCancel(
+            this.api,
+            { host_id: this.hostId },
+            { keepalive: true },
+        ).catch(() => { })
     }
 
     private async shouldAutoClose(graceful: boolean): Promise<boolean> {

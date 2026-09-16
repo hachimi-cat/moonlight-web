@@ -182,12 +182,16 @@
 }
 
 .pw-game-launch-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-height: 44px;
     margin: 0;
     padding: 0 18px;
     border-radius: 11px;
     font: inherit;
     font-weight: 700;
+    text-decoration: none;
     cursor: pointer;
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;

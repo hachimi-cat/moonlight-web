@@ -58,7 +58,10 @@ export class PawpadoLaunchOverlay {
     private controllerHelp = document.createElement("div")
     private primary = document.createElement("button")
     private retry = document.createElement("button")
-    private leave = document.createElement("button")
+    // A real link is the final safety net: returning to the portal must still
+    // work if the stream's control/API request is stalled. The click handler
+    // only performs best-effort host cleanup and never owns navigation.
+    private leave = document.createElement("a")
     private controllerCleanup: (() => void) | null = null
     private parent: HTMLElement | null = null
 
@@ -138,7 +141,8 @@ export class PawpadoLaunchOverlay {
         this.retry.className = "pw-game-launch-button pw-game-launch-button-primary"
         this.retry.textContent = "Try again"
         this.retry.hidden = true
-        this.leave.type = "button"
+        this.leave.href = "/dashboard/games"
+        this.leave.target = "_self"
         this.leave.className = "pw-game-launch-button pw-game-launch-button-quiet"
         this.leave.textContent = "Cancel launch"
         actions.append(this.primary, this.retry, this.leave)
@@ -171,7 +175,13 @@ export class PawpadoLaunchOverlay {
     }
 
     setCancelHandler(handler: () => void | Promise<void>) {
-        this.leave.onclick = () => void handler()
+        this.leave.onclick = () => {
+            void handler()
+            // Direct launches normally live in a script-opened tab. Close it
+            // while the trusted click is still active; if the browser refuses,
+            // the anchor's native /dashboard/games navigation still happens.
+            window.close()
+        }
     }
 
     setRetryHandler(handler: () => void | Promise<void>) {

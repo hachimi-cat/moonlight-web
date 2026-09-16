@@ -153,6 +153,24 @@ showNotification("Lost connection to the host. Retrying…", "error")
 showNotification("H.265 is not supported by this browser; fell back to H.264.", "warn")
 showNotification("Paired with pawpado-browser.", "info")
 
+// Exercise the direct-game reconnect surface and its native library link on
+// demand. Browser automation opens `?launch=1`, clicks the exact production
+// component, and verifies navigation even when cleanup never resolves.
+if (new URLSearchParams(window.location.search).get("launch") == "1") {
+    void import("../../component/pawpado_launch_overlay").then(({ PawpadoLaunchOverlay }) => {
+        const overlay = new PawpadoLaunchOverlay({
+            slug: "bioshock-infinite",
+            title: "BioShock Infinite",
+            machine: "Hardcore",
+            quality: "1440p",
+            fps: 60,
+        })
+        overlay.setCancelHandler(() => new Promise(() => { }))
+        overlay.mount(document.body)
+        overlay.showReconnect()
+    })
+}
+
 // The REAL settings panel, constructed with a permissive role. This is the
 // component customers actually see in the stream sidebar — far better as a
 // visual check than the hand-built panels above.
