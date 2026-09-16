@@ -34,11 +34,8 @@ export class WebRTCTransport implements Transport {
     private mediaReceived = false
     private lastMediaPacketCount: number | null = null
     private lastMediaProgressAt = 0
-    private lastVideoReceived: number | null = null
-    private lastVideoLost: number | null = null
     private lastVideoFramesDecoded: number | null = null
     private lastVideoFrameProgressAt = 0
-    private consecutiveSevereLossSamples = 0
     private shutdownSignaled = false
     private mediaWatchdogRunning = false
     private preserveMoonlightSession: boolean
@@ -54,9 +51,6 @@ export class WebRTCTransport implements Transport {
     // still recover at 8 seconds; allow a longer grace only when partial RTP
     // or audio continues but no complete video frame is decoded.
     private static readonly VIDEO_FRAME_STALL_MS = 15000
-    private static readonly SEVERE_LOSS_RATIO = 0.12
-    private static readonly SEVERE_LOSS_MIN_PACKETS = 100
-    private static readonly SEVERE_LOSS_CONFIRMATION_SAMPLES = 2
 
     constructor(api: Api, configuration: RTCConfiguration, logger?: Logger, preserveMoonlightSession: boolean = false) {
         this.logger = logger
@@ -231,7 +225,6 @@ export class WebRTCTransport implements Transport {
             const stats = await this.peer.getStats()
             let mediaPacketCount = 0
             let videoReceived: number | null = null
-            let videoLost: number | null = null
             let videoFramesDecoded: number | null = null
 
             for (const [_key, value] of stats) {
@@ -243,7 +236,6 @@ export class WebRTCTransport implements Transport {
                 }
                 if (value.kind == "video") {
                     videoReceived = typeof value.packetsReceived == "number" ? value.packetsReceived : null
-                    videoLost = typeof value.packetsLost == "number" ? value.packetsLost : null
                     videoFramesDecoded = typeof value.framesDecoded == "number" ? value.framesDecoded : null
                 }
             }
@@ -256,30 +248,14 @@ export class WebRTCTransport implements Transport {
                 this.lastMediaProgressAt = now
             }
 
-            if (videoReceived != null && videoLost != null
-                && this.lastVideoReceived != null && this.lastVideoLost != null
-            ) {
-                const received = Math.max(0, videoReceived - this.lastVideoReceived)
-                const lost = Math.max(0, videoLost - this.lastVideoLost)
-                const total = received + lost
-                const lossRatio = lost / Math.max(1, total)
-                const severe = total >= WebRTCTransport.SEVERE_LOSS_MIN_PACKETS
-                    && lossRatio >= WebRTCTransport.SEVERE_LOSS_RATIO
-                this.consecutiveSevereLossSamples = severe
-                    ? this.consecutiveSevereLossSamples + 1
-                    : 0
-                if (this.consecutiveSevereLossSamples
-                    >= WebRTCTransport.SEVERE_LOSS_CONFIRMATION_SAMPLES
-                ) {
-                    this.logger?.debug(
-                        `WebRTC media degraded for ${this.consecutiveSevereLossSamples} checks ` +
-                        `(${(lossRatio * 100).toFixed(1)}% video packet loss); reconnecting`,
-                    )
-                    this.consecutiveSevereLossSamples = 0
-                    await this.closeForRecovery("degraded")
-                    return
-                }
-            }
+            // Packet loss while ICE is still connected is congestion, not a
+            // dead route. Restarting ICE cannot choose a different path here
+            // (the same host/prflx UDP pair wins again), and every restart
+            // closes the active socket while the host is still writing RTP.
+            // In production that turned one lossy two-second interval into a
+            // reconnect every 5-20 seconds plus thousands of WSAENETUNREACH
+            // send failures. Let WebRTC congestion control, NACK and FEC do
+            // their jobs; recover only when media actually stops progressing.
 
             if (videoFramesDecoded != null) {
                 if (this.lastVideoFramesDecoded == null
@@ -308,8 +284,6 @@ export class WebRTCTransport implements Transport {
             }
 
             this.lastMediaPacketCount = mediaPacketCount
-            this.lastVideoReceived = videoReceived
-            this.lastVideoLost = videoLost
 
             // Timers are throttled in background tabs. Only declare a stall
             // while visible; when the tab returns, the next progressing
@@ -405,11 +379,8 @@ export class WebRTCTransport implements Transport {
             this.mediaReceived = false
             this.lastMediaPacketCount = null
             this.lastMediaProgressAt = now
-            this.lastVideoReceived = null
-            this.lastVideoLost = null
             this.lastVideoFramesDecoded = null
             this.lastVideoFrameProgressAt = now
-            this.consecutiveSevereLossSamples = 0
             this.logger?.debug(
                 "WebRTC ICE restart completed; controller session preserved",
                 { type: "recover" },

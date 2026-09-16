@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use moonlight_common::stream::{audio::AudioFrame, tokio::MoonlightStream};
@@ -66,6 +69,8 @@ impl AudioChannel {
             async move {
                 let mut sequence_number = 0u16;
                 let mut binding_was_paused = false;
+                let mut next_send_warning_at = Instant::now();
+                let mut suppressed_send_failures = 0u64;
 
                 while let Some(frame) = frame_receiver.recv().await {
                     // 48kHz clock; micros keep 5ms Opus frames from being
@@ -113,7 +118,18 @@ impl AudioChannel {
                         )
                         .await
                     {
-                        warn!(error = %err, "failed to send audio frame");
+                        let now = Instant::now();
+                        if now >= next_send_warning_at {
+                            warn!(
+                                error = %err,
+                                suppressed = suppressed_send_failures,
+                                "failed to send audio frame"
+                            );
+                            suppressed_send_failures = 0;
+                            next_send_warning_at = now + Duration::from_secs(5);
+                        } else {
+                            suppressed_send_failures += 1;
+                        }
                     }
                 }
             }

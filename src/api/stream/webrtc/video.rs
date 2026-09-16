@@ -1,4 +1,9 @@
-use std::{collections::HashMap, mem::swap, sync::Arc};
+use std::{
+    collections::HashMap,
+    mem::swap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use moonlight_common::{
@@ -118,6 +123,8 @@ impl VideoChannel {
             async move {
                 let mut sequence_number = 0u16;
                 let mut binding_was_paused = false;
+                let mut next_send_warning_at = Instant::now();
+                let mut suppressed_send_failures = 0u64;
 
                 while let Some(frame) = frame_receiver.recv().await {
                     let frame = frame.as_ref();
@@ -184,7 +191,27 @@ impl VideoChannel {
                             )
                             .await
                         {
-                            warn!(error = %err, "failed to send video packet");
+                            // An ICE restart temporarily closes the selected
+                            // UDP route. Continuing through every payload of
+                            // the frame produced thousands of identical
+                            // WSAENETUNREACH lines per second and made the
+                            // recovery itself compete with the stream. Once
+                            // one RTP packet failed, the frame is unusable;
+                            // drop its remaining payloads and rate-limit the
+                            // operational warning.
+                            let now = Instant::now();
+                            if now >= next_send_warning_at {
+                                warn!(
+                                    error = %err,
+                                    suppressed = suppressed_send_failures,
+                                    "failed to send video frame"
+                                );
+                                suppressed_send_failures = 0;
+                                next_send_warning_at = now + Duration::from_secs(5);
+                            } else {
+                                suppressed_send_failures += 1;
+                            }
+                            break;
                         }
                     }
                 }
