@@ -66,6 +66,7 @@ export class PawpadoLaunchOverlay {
     private leave = document.createElement("a")
     private controllerCleanup: (() => void) | null = null
     private parent: HTMLElement | null = null
+    private visibilityGeneration = 0
 
     constructor(readonly game: PawpadoGamePresentation) {
         this.root.className = "pw-game-launch"
@@ -168,10 +169,15 @@ export class PawpadoLaunchOverlay {
     }
 
     mount(parent: HTMLElement) {
+        const generation = ++this.visibilityGeneration
         this.parent = parent
         if (!this.root.isConnected) parent.appendChild(this.root)
         this.root.hidden = false
-        requestAnimationFrame(() => this.root.classList.add("pw-game-launch-visible"))
+        requestAnimationFrame(() => {
+            if (generation == this.visibilityGeneration) {
+                this.root.classList.add("pw-game-launch-visible")
+            }
+        })
     }
 
     setCancelHandler(handler: () => void | Promise<void>) {
@@ -359,10 +365,13 @@ export class PawpadoLaunchOverlay {
     }
 
     hide() {
+        // A delayed mount frame must not undo this hide. Conversely, the
+        // fade timer must not hide an overlay remounted for a NEW reconnect.
+        const generation = ++this.visibilityGeneration
         this.controllerCleanup?.()
         this.root.classList.remove("pw-game-launch-visible")
         window.setTimeout(() => {
-            if (!this.root.classList.contains("pw-game-launch-visible")) {
+            if (generation == this.visibilityGeneration) {
                 this.root.hidden = true
             }
         }, 280)

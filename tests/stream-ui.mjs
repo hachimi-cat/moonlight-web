@@ -47,6 +47,9 @@ for (const scenario of ["mouse-fullscreen", "mouse-pointer-lock", "keyboard", "s
         await page.waitForFunction(() => Boolean(window.app));
         await page.evaluate(scenario => {
             window.close = () => {}; // normal tab: verify the native-link fallback
+            // The unavailable fake host must not replace our deliberately
+            // failed UI state with an unrelated background reconnect.
+            window.app.stream.eventTarget = new EventTarget();
             window.app.requestFullscreen = async () => window.reportFullscreen();
             window.app.requestPointerLock = async () => window.reportPointerLock();
             window.app.fullscreenOnNextInteractionArmed = scenario !== "mouse-pointer-lock";

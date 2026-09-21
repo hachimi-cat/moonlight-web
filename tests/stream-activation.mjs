@@ -23,6 +23,11 @@ for (const [engine, kind] of [[webkit, 'trackpad'], [webkit, 'touch'], [webkit, 
     if (process.env.PAWPADO_STREAM_SKIN) await page.addStyleTag({ content: fs.readFileSync(process.env.PAWPADO_STREAM_SKIN, 'utf8') });
     await page.evaluate(() => {
       const app = window.app;
+      // This fixture drives game/frame/audio readiness below; there is no
+      // real host. Its failed background transport must not race those
+      // controlled states by reopening the overlay midway through a retry.
+      // Keep ViewerApp's real DOM/input handlers, isolate only host events.
+      app.stream.eventTarget = new EventTarget();
       document.querySelector('.pw-game-launch').style.display = 'none';
       app.fullscreenOnNextInteractionArmed = false;
       Object.defineProperty(document.getElementById('input'), 'requestPointerLock', { value: undefined, configurable: true });
@@ -76,6 +81,32 @@ for (const [engine, kind] of [[webkit, 'trackpad'], [webkit, 'touch'], [webkit, 
       await page.waitForFunction(() => !window.app.launchOverlay.isVisible());
       assert.ok((await page.evaluate(() => window.counts)).audio > 0);
       assert.equal((await page.evaluate(() => window.counts)).fullscreen, 1);
+    }
+    if (engine === chromium) {
+      await page.evaluate(() => {
+        const overlay = window.app.launchOverlay;
+        document.querySelector('.pw-game-launch').style.removeProperty('display');
+        const requestFrame = window.requestAnimationFrame;
+        const pending = [];
+        // Simulate a busy/backgrounded page: mount's animation callback
+        // arrives only AFTER media activation has already hidden the cover.
+        window.requestAnimationFrame = callback => { pending.push(callback); return 9999; };
+        try { overlay.mount(document.body); overlay.hide(); }
+        finally { window.requestAnimationFrame = requestFrame; }
+        pending.forEach(callback => callback(performance.now()));
+      });
+      await page.waitForTimeout(400);
+      assert.equal(await page.evaluate(() => window.app.launchOverlay.isVisible()), false,
+        'A delayed mount animation must not reopen a completed loading screen');
+      await page.evaluate(() => {
+        const overlay = window.app.launchOverlay;
+        overlay.mount(document.body);
+        overlay.hide();
+        overlay.mount(document.body); // a NEW reconnect legitimately owns it
+      });
+      await page.waitForTimeout(400);
+      assert.equal(await page.evaluate(() => window.app.launchOverlay.isVisible()), true,
+        'An old hide timer must not hide a new reconnect overlay');
     }
     console.log(`PASS activation ${kind}`);
   } finally { await browser.close(); }
