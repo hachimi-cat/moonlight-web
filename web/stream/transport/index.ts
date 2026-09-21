@@ -56,6 +56,8 @@ export interface Transport {
     onconnect: ((connectData: TransportConnectData) => void) | null
     onclose: ((shutdown: TransportShutdown) => void) | null
     close(): Promise<void>
+    /** A confirmed game exit must not be repaired as a media failure. */
+    suspendRecovery?(): void
 
     // -- Only allowed after onconnect was called
     setVideoPipeline(type: "videotrack", pipeline: (TrackVideoRenderer & VideoRenderer)): Promise<void>

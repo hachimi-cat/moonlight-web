@@ -191,6 +191,7 @@ export class Stream implements Component {
     }
 
     async startConnection(): Promise<void> {
+        if (this.streamEndedDispatched) return
         this.debugLog(`Permissions: ${JSON.stringify(this.permissions)}`)
 
         const desiredTransport = this.transportOverride ?? this.settings.dataTransport
@@ -199,6 +200,7 @@ export class Stream implements Component {
         let shutdown: TransportShutdown | undefined
         if (desiredTransport == "auto") {
             shutdown = await this.tryWebRTCTransport()
+            if (this.streamEndedDispatched) return
 
             if (shutdown == "failednoconnect") {
                 this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" })
@@ -225,6 +227,8 @@ export class Stream implements Component {
         // `graceful` permanently false and the auto-close branch downstream
         // unreachable — the tab never closed and every clean quit was
         // reported to the player as a lost connection.
+        if (this.streamEndedDispatched) return
+
         if ((shutdown == "degraded" || shutdown == "stalled")
             && this.mediaRecoveryAttempts < MEDIA_RECOVERY_MAX_ATTEMPTS
         ) {
@@ -711,7 +715,7 @@ export class Stream implements Component {
                 // immediately, then close our local transport so non-auto-
                 // closing clients also stop rendering the stale stream.
                 if (this.serverTerminationGraceful) {
-                    this.dispatchStreamEnded(true)
+                    this.notifyGameExited()
                     this.transport?.close().catch(error => {
                         this.debugLog(`failed to close transport after server termination: ${error}`)
                     })
@@ -724,6 +728,14 @@ export class Stream implements Component {
     /** Set when the host said it was ending the stream deliberately. */
     private serverTerminationGraceful = false
     private streamEndedDispatched = false
+
+    /** The launcher confirmed that THIS game invocation has exited.
+     *  Do not cancel Apollo here: it is already cleaning up its app slot. */
+    notifyGameExited() {
+        this.serverTerminationGraceful = true
+        this.transport?.suspendRecovery?.()
+        this.dispatchStreamEnded(true)
+    }
 
     private dispatchStreamEnded(graceful: boolean) {
         if (this.streamEndedDispatched) {

@@ -12,6 +12,8 @@ use crate::app::user::AuthenticatedUser;
 struct LaunchState {
     slug: String,
     title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_id: Option<String>,
     state: String,
     updated_at: i64,
     pid: Option<u32>,
@@ -127,6 +129,7 @@ mod tests {
         let mut state = LaunchState {
             slug: "bioshock-infinite".into(),
             title: "BioShock Infinite".into(),
+            launch_id: Some("current-launch".into()),
             state: "running".into(),
             updated_at: 1,
             pid: Some(42),
@@ -146,6 +149,7 @@ mod tests {
         let mut state = LaunchState {
             slug: "cuphead".into(),
             title: "Cuphead".into(),
+            launch_id: None,
             state: "running".into(),
             updated_at: 1,
             pid: Some(42),
@@ -170,6 +174,7 @@ mod tests {
         let mut state = LaunchState {
             slug: "cuphead".into(),
             title: "Cuphead".into(),
+            launch_id: None,
             state: "running".into(),
             updated_at: 1,
             pid: Some(42),
@@ -184,5 +189,32 @@ mod tests {
         state.pid = None;
         normalize_running_state(&mut state, |_| false);
         assert_eq!(state.state, "starting");
+    }
+
+    #[test]
+    fn launch_identity_survives_the_status_api_roundtrip() {
+        let json = serde_json::json!({
+            "slug": "bioshock-infinite", "title": "BioShock Infinite",
+            "launchId": "second-launch", "state": "exited", "updatedAt": 42,
+            "pid": 8744, "message": "Game closed"
+        });
+        let state: LaunchState = serde_json::from_value(json.clone()).expect("valid launch record");
+        assert_eq!(
+            serde_json::to_value(state).expect("serializable launch record"),
+            json
+        );
+    }
+
+    #[test]
+    fn legacy_launch_records_without_identity_remain_readable() {
+        let json = serde_json::json!({
+            "slug": "cuphead", "title": "Cuphead", "state": "running",
+            "updatedAt": 42, "pid": 1, "message": null
+        });
+        let state: LaunchState = serde_json::from_value(json.clone()).expect("valid legacy record");
+        assert_eq!(
+            serde_json::to_value(state).expect("serializable legacy record"),
+            json
+        );
     }
 }

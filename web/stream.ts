@@ -212,6 +212,8 @@ class ViewerApp implements Component {
     private launchOverlay: PawpadoLaunchOverlay | null
     private launchStateBaseline: PawpadoLaunchState | null
     private activeDirectLaunchId: string | null = null
+    private gameExitWatchTimer: number | null = null
+    private streamEnding = false
 
     // BioShock Infinite destroys its first window while entering exclusive
     // fullscreen and can leave desktop duplication without a complete frame
@@ -333,6 +335,7 @@ class ViewerApp implements Component {
         // desktop fallback. The request uses keepalive because unload
         // handlers cannot be awaited by the browser.
         const stopOnPageExit = () => {
+            this.stopGameExitWatch()
             if (this.pageExitHandled) return
             this.pageExitHandled = true
 
@@ -413,6 +416,8 @@ class ViewerApp implements Component {
 
     private async onInfo(event: InfoEvent) {
         const data = event.detail
+        // Pending ICE/frame callbacks cannot reopen or overwrite the closing UI.
+        if (this.streamEnding) return
 
         if (data.type == "app") {
             const appName = data.appName
@@ -449,6 +454,9 @@ class ViewerApp implements Component {
                 this.showIOSSoundGate()
             }
         } else if (data.type == "streamEnded") {
+            this.streamEnding = true
+            this.stopGameExitWatch()
+            if (data.graceful) this.launchOverlay?.showClosing()
             // Quit-the-game closes the tab, but ONLY when the embedder asked
             // for it (?autoclose=1). A ServerTermination packet is the best
             // signal, but Apollo does not send one on every app-exit path. If
@@ -518,7 +526,10 @@ class ViewerApp implements Component {
                     if (state.state == "preparing" || state.state == "starting" || state.state == "running") {
                         this.launchOverlay.setLaunchState(state.state, state.message)
                     }
-                    if (state.state == "running") return
+                    if (state.state == "running") {
+                        this.startGameExitWatch()
+                        return
+                    }
                 }
             } catch {
                 // The status file may not exist during the launcher's first
@@ -538,6 +549,39 @@ class ViewerApp implements Component {
             return state.launchId != this.launchStateBaseline.launchId
         }
         return state.updatedAt > this.launchStateBaseline.updatedAt
+    }
+
+    private belongsToActiveLaunch(state: PawpadoLaunchState | null): boolean {
+        return state != null && state.slug == this.launchOverlay?.game.slug &&
+            (this.activeDirectLaunchId != null
+                ? state.launchId == this.activeDirectLaunchId
+                : this.isFreshLaunchState(state))
+    }
+
+    private startGameExitWatch() {
+        if (this.gameExitWatchTimer != null || this.streamEnding || this.pageExitHandled) return
+        // Observe the lightweight launcher record during play, not just after
+        // transport failure. Apollo may finish process/display cleanup after
+        // media ends, and its termination packet can be lost in that interval.
+        this.gameExitWatchTimer = window.setTimeout(async () => {
+            try {
+                const state = await apiGetPawpadoLaunchState(this.api)
+                if (!this.streamEnding && !this.pageExitHandled &&
+                    this.belongsToActiveLaunch(state) && state?.state == "exited") {
+                    this.stream.notifyGameExited()
+                }
+            } catch {
+                // An unreachable host is NOT evidence of a normal game exit.
+            } finally {
+                this.gameExitWatchTimer = null
+                this.startGameExitWatch()
+            }
+        }, 1000)
+    }
+
+    private stopGameExitWatch() {
+        if (this.gameExitWatchTimer != null) window.clearTimeout(this.gameExitWatchTimer)
+        this.gameExitWatchTimer = null
     }
 
     private async waitForFreshVideoFrame(timeoutMs: number): Promise<void> {
@@ -585,9 +629,12 @@ class ViewerApp implements Component {
             await this.waitForMatchingGameProcess()
             await this.waitForFreshVideoFrame(ViewerApp.DIRECT_GAME_FRAME_TIMEOUT_MS)
             await controllerReady
+            if (this.streamEnding || this.pageExitHandled) return
             if (isIOSWebKit()) await this.launchOverlay.waitForSound(() => this.activateReadyMedia())
+            if (this.streamEnding || this.pageExitHandled) return
             this.launchOverlay.hide()
         } catch (error) {
+            if (this.streamEnding || this.pageExitHandled) return
             this.launchOverlay.fail(
                 `Couldn’t open ${this.launchOverlay.game.title}`,
                 error instanceof Error ? error.message : "The game did not finish opening.",
@@ -596,13 +643,16 @@ class ViewerApp implements Component {
     }
 
     private async finishReconnectOverlay() {
-        if (!this.launchOverlay || this.reconnectOverlayRunning || !this.launchOverlay.isVisible()) return
+        if (!this.launchOverlay || this.streamEnding || this.pageExitHandled || this.reconnectOverlayRunning || !this.launchOverlay.isVisible()) return
         this.reconnectOverlayRunning = true
         try {
             await this.waitForFreshVideoFrame(ViewerApp.RECONNECT_FRAME_TIMEOUT_MS)
+            if (this.streamEnding || this.pageExitHandled) return
             if (isIOSWebKit()) await this.launchOverlay.waitForSound(() => this.activateReadyMedia())
+            if (this.streamEnding || this.pageExitHandled) return
             this.launchOverlay.hide()
         } catch (error) {
+            if (this.streamEnding || this.pageExitHandled) return
             this.launchOverlay.fail(
                 "The stream could not recover",
                 error instanceof Error ? error.message : "No fresh game picture arrived.",
@@ -614,6 +664,7 @@ class ViewerApp implements Component {
 
     private cancelAndReturnToLibrary() {
         this.pageExitHandled = true
+        this.stopGameExitWatch()
         // Navigation cannot wait up to the API's 12-second timeout: doing so
         // loses the trusted click needed by window.close() and made the button
         // appear dead during a broken stream. Dispatch cleanup with unload
@@ -642,11 +693,7 @@ class ViewerApp implements Component {
             if (this.launchOverlay) {
                 try {
                     const state = await apiGetPawpadoLaunchState(this.api)
-                    const belongsToActiveLaunch = state?.slug == this.launchOverlay.game.slug &&
-                        (this.activeDirectLaunchId
-                            ? state.launchId == this.activeDirectLaunchId
-                            : state != null && this.isFreshLaunchState(state))
-                    if (belongsToActiveLaunch) {
+                    if (state && this.belongsToActiveLaunch(state)) {
                         if (state.state == "failed") return false
                         if (state.state == "preparing" || state.state == "starting" || state.state == "running") {
                             // A delayed packet from an older teardown must

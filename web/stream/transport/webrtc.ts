@@ -40,6 +40,7 @@ export class WebRTCTransport implements Transport {
     private mediaWatchdogRunning = false
     private preserveMoonlightSession: boolean
     private iceRestartRunning = false
+    private recoverySuspended = false
 
     private static readonly MEDIA_WATCHDOG_INTERVAL_MS = 2000
     private static readonly MEDIA_STALL_MS = 8000
@@ -199,7 +200,7 @@ export class WebRTCTransport implements Transport {
     }
 
     private startMediaWatchdog() {
-        if (this.mediaWatchdogTimer != null) {
+        if (this.mediaWatchdogTimer != null || this.recoverySuspended || this.shutdownSignaled) {
             return
         }
         this.lastMediaProgressAt = Date.now()
@@ -217,13 +218,19 @@ export class WebRTCTransport implements Transport {
         }
     }
 
+    suspendRecovery() {
+        this.recoverySuspended = true
+        this.stopMediaWatchdog()
+    }
+
     private async checkMediaProgress() {
-        if (this.mediaWatchdogRunning || this.shutdownSignaled || this.peer.connectionState != "connected") {
+        if (this.mediaWatchdogRunning || this.shutdownSignaled || this.recoverySuspended || this.peer.connectionState != "connected") {
             return
         }
         this.mediaWatchdogRunning = true
         try {
             const stats = await this.peer.getStats()
+            if (this.recoverySuspended || this.shutdownSignaled) return
             let mediaPacketCount = 0
             let videoReceived: number | null = null
             let videoFramesDecoded: number | null = null
@@ -305,7 +312,7 @@ export class WebRTCTransport implements Transport {
     }
 
     private async closeForRecovery(reason: "degraded" | "stalled") {
-        if (this.shutdownSignaled) {
+        if (this.shutdownSignaled || this.recoverySuspended) {
             return
         }
 
@@ -343,7 +350,7 @@ export class WebRTCTransport implements Transport {
      * never go away.
      */
     private async restartIceInPlace(reason: "degraded" | "stalled") {
-        if (this.iceRestartRunning || !this.location) {
+        if (this.iceRestartRunning || !this.location || this.recoverySuspended || this.shutdownSignaled) {
             return
         }
         this.iceRestartRunning = true
@@ -361,7 +368,9 @@ export class WebRTCTransport implements Transport {
                 { type: "recover" },
             )
             const offer = await this.peer.createOffer({ iceRestart: true })
+            if (this.recoverySuspended || this.shutdownSignaled) return
             await this.peer.setLocalDescription(offer)
+            if (this.recoverySuspended || this.shutdownSignaled) return
             if (!offer.sdp) {
                 throw new Error("ICE restart offer contained no SDP")
             }
@@ -371,8 +380,11 @@ export class WebRTCTransport implements Transport {
                 sdp: offer.sdp,
                 response: "ignore",
             }, 20000)
+            if (this.recoverySuspended || this.shutdownSignaled) return
             const answerSdp = await response.text()
+            if (this.recoverySuspended || this.shutdownSignaled) return
             await this.peer.setRemoteDescription({ type: "answer", sdp: answerSdp })
+            if (this.recoverySuspended || this.shutdownSignaled) return
 
             // Reset the health baseline. If the repaired route still carries
             // no media, the watchdog will retry after a fresh stall window.
@@ -387,6 +399,7 @@ export class WebRTCTransport implements Transport {
                 { type: "recover" },
             )
         } catch (error) {
+            if (this.recoverySuspended || this.shutdownSignaled) return
             // Do not fall through to DELETE+POST for a controller launch: that
             // is exactly what migrates the virtual pad to another XInput slot.
             // Leave the peer in place and retry after the next stall window.
@@ -530,7 +543,7 @@ export class WebRTCTransport implements Transport {
     }
 
     async close(): Promise<void> {
-        this.stopMediaWatchdog()
+        this.suspendRecovery()
         this.controlStream.setChannel(null)
 
         // Close the peer
