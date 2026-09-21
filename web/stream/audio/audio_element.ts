@@ -53,11 +53,11 @@ export class AudioElementPlayer implements TrackAudioPlayer {
         this.oldTrack = track
     }
 
-    onUserInteraction(): void {
+    onUserInteraction(): Promise<void> {
         this.audioElement.muted = false
         // Autoplay can be refused outright rather than merely muted; a
         // play() from inside a gesture is the only reliable recovery.
-        this.audioElement.play().catch(() => { })
+        return this.audioElement.play()
     }
 
     mount(parent: HTMLElement): void {

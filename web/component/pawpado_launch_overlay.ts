@@ -209,10 +209,9 @@ export class PawpadoLaunchOverlay {
      * not hold the host launcher: keyboard/mouse and touch players can always
      * continue while the game keeps opening behind this screen.
      */
-    waitForController(onUserInteraction: () => void): Promise<void> {
+    waitForController(): Promise<void> {
         this.controller.hidden = false
         this.controllerStatus.textContent = "Checking this browser for a controller…"
-        const needsSoundTap = isIOSWebKit()
 
         return new Promise(resolve => {
             let finished = false
@@ -228,16 +227,7 @@ export class PawpadoLaunchOverlay {
                 resolve()
             }
             const useWithoutController = () => {
-                onUserInteraction()
-                this.controllerStatus.textContent = needsSoundTap
-                    ? "Sound enabled · using touch controls"
-                    : "Continuing with keyboard & mouse"
-                this.primary.hidden = true
-                finish()
-            }
-            const confirmIOSSound = () => {
-                onUserInteraction()
-                this.controllerStatus.textContent = "Controller connected · sound enabled"
+                this.controllerStatus.textContent = "Continuing with touch, keyboard or mouse"
                 this.primary.hidden = true
                 finish()
             }
@@ -245,16 +235,9 @@ export class PawpadoLaunchOverlay {
                 if (!visibleGamepad()) return
                 this.controllerHelp.hidden = true
                 missingShown = false
-                if (needsSoundTap) {
-                    this.controllerStatus.textContent = "Controller connected · tap once to enable sound"
-                    this.primary.textContent = "Enable sound and continue"
-                    this.primary.hidden = false
-                    this.primary.onclick = confirmIOSSound
-                } else {
-                    this.controllerStatus.textContent = "Controller connected"
-                    this.primary.hidden = true
-                    window.setTimeout(finish, 450)
-                }
+                this.controllerStatus.textContent = "Controller connected"
+                this.primary.hidden = true
+                finish()
             }
             const showMissing = () => {
                 if (finished || visibleGamepad()) {
@@ -264,8 +247,8 @@ export class PawpadoLaunchOverlay {
                 missingShown = true
                 this.controllerStatus.textContent = "No controller detected in this browser"
                 this.controllerHelp.hidden = !isWindowsChrome()
-                this.primary.textContent = needsSoundTap
-                    ? "Enable sound and use touch controls"
+                this.primary.textContent = isIOSWebKit()
+                    ? "Continue with touch, keyboard or mouse"
                     : "Continue with keyboard & mouse"
                 this.primary.hidden = false
                 this.primary.onclick = useWithoutController
@@ -286,6 +269,31 @@ export class PawpadoLaunchOverlay {
                 }
             }
             check()
+        })
+    }
+
+    /** Called only after this launch has both a running game and fresh video. */
+    waitForSound(activate: () => Promise<void>): Promise<void> {
+        this.status.textContent = "Your game is ready"
+        this.detail.textContent = "Click, tap, or press Enter to enable sound and play."
+        this.progress.hidden = true
+        this.primary.textContent = "Enable sound and continue"
+        this.primary.hidden = false
+        return new Promise(resolve => {
+            this.primary.onclick = () => {
+                this.primary.disabled = true
+                // Invoke before any await: Safari requires the real user gesture.
+                const activation = activate()
+                void activation.then(() => {
+                    this.primary.onclick = null
+                    this.primary.disabled = false
+                    resolve()
+                }, () => {
+                    this.detail.textContent = "Sound could not start. Click or tap to try again."
+                    this.primary.disabled = false
+                })
+            }
+            this.primary.focus()
         })
     }
 

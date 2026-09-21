@@ -16,7 +16,7 @@ export interface AudioPlayer extends Component, Pipe {
     setup(setup: AudioPlayerSetup): void
     cleanup(): void
 
-    onUserInteraction(): void
+    onUserInteraction(): void | Promise<void>
 
     mount(parent: HTMLElement): void
     unmount(parent: HTMLElement): void

@@ -580,11 +580,12 @@ class ViewerApp implements Component {
 
     private async finishDirectGameLaunch() {
         if (!this.launchOverlay) return
-        const controllerReady = this.launchOverlay.waitForController(() => this.onUserInteraction())
+        const controllerReady = this.launchOverlay.waitForController()
         try {
             await this.waitForMatchingGameProcess()
             await this.waitForFreshVideoFrame(ViewerApp.DIRECT_GAME_FRAME_TIMEOUT_MS)
             await controllerReady
+            if (isIOSWebKit()) await this.launchOverlay.waitForSound(() => this.activateReadyMedia())
             this.launchOverlay.hide()
         } catch (error) {
             this.launchOverlay.fail(
@@ -599,6 +600,7 @@ class ViewerApp implements Component {
         this.reconnectOverlayRunning = true
         try {
             await this.waitForFreshVideoFrame(ViewerApp.RECONNECT_FRAME_TIMEOUT_MS)
+            if (isIOSWebKit()) await this.launchOverlay.waitForSound(() => this.activateReadyMedia())
             this.launchOverlay.hide()
         } catch (error) {
             this.launchOverlay.fail(
@@ -689,7 +691,21 @@ class ViewerApp implements Component {
         this.focusInput()
 
         this.stream.getVideoRenderer()?.onUserInteraction()
-        this.stream.getAudioPlayer()?.onUserInteraction()
+        void Promise.resolve(this.stream.getAudioPlayer()?.onUserInteraction()).catch(() => { })
+    }
+
+    private activateReadyMedia(): Promise<void> {
+        try {
+            this.stream.getVideoRenderer()?.onUserInteraction()
+            const player = this.stream.getAudioPlayer()
+            if (!player) return Promise.reject(new Error("Audio is not ready"))
+            const activation = player.onUserInteraction()
+            // Start both operations within this same trusted click/tap/Enter.
+            this.consumeAutoFullscreenInteraction()
+            return Promise.resolve(activation)
+        } catch (error) {
+            return Promise.reject(error)
+        }
     }
 
     /**
@@ -712,7 +728,7 @@ class ViewerApp implements Component {
         const button = document.createElement("button")
         button.type = "button"
         button.style.cssText = "width:min(420px,100%);box-sizing:border-box;border:1px solid rgba(255,255,255,.16);border-radius:18px;background:#1b1614;color:#f7f3ef;padding:28px 24px;box-shadow:0 24px 80px rgba(0,0,0,.55);font:inherit;text-align:center;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent"
-        button.innerHTML = "<strong id=\"sound-gate-title\" style=\"display:block;font-size:22px;line-height:1.25\">Tap to play with sound</strong><span style=\"display:block;margin-top:9px;color:#c9bdb4\">Safari needs one screen tap before it can play game audio.</span>"
+        button.innerHTML = "<strong id=\"sound-gate-title\" style=\"display:block;font-size:22px;line-height:1.25\">Play with sound</strong><span style=\"display:block;margin-top:9px;color:#c9bdb4\">Click, tap, or press Enter to enable game audio.</span>"
         overlay.appendChild(button)
 
         let finished = false
@@ -723,14 +739,14 @@ class ViewerApp implements Component {
             finished = true
             // Keep this synchronous: Safari only permits play()/resume()
             // while the tap's transient activation is still live.
-            this.onUserInteraction()
-            overlay.remove()
+            void this.activateReadyMedia().then(() => overlay.remove(), () => {
+                finished = false
+                button.textContent = "Sound could not start. Click or tap to try again."
+            })
         }
         // ViewerApp owns document-level touch handlers that intentionally
         // prevent synthetic clicks. Consume the real touch here instead.
-        button.addEventListener("touchstart", event => event.stopPropagation(), { passive: true })
-        button.addEventListener("touchend", enter, { passive: false })
-        button.addEventListener("pointerup", enter)
+        stopPropagationOn(overlay)
         button.addEventListener("click", enter)
         document.body.appendChild(overlay)
         button.focus()
@@ -864,6 +880,7 @@ class ViewerApp implements Component {
 
     // Mouse
     onMouseButtonDown(event: MouseEvent) {
+        this.onUserInteraction()
         if (this.consumeAutoFullscreenInteraction()) {
             this.pendingAutoFullscreenMouseGesture = true
             event.preventDefault()
@@ -871,16 +888,18 @@ class ViewerApp implements Component {
             return
         }
 
-        if (this.pawpadoAutoPointerLock && !document.pointerLockElement) {
+        const pointerLockSupported = typeof document.getElementById("input")?.requestPointerLock == "function"
+        if (this.pawpadoAutoPointerLock && pointerLockSupported && !document.pointerLockElement) {
             event.preventDefault()
             event.stopPropagation()
             void this.requestPointerLock(true).catch(error => {
+                this.pawpadoAutoPointerLock = false
+                this.inputConfig.mouseMode = this.previousMouseMode
+                this.setInputConfig(this.inputConfig)
                 console.warn("failed to enter Pawpado pointer lock", error)
             })
             return
         }
-
-        this.onUserInteraction()
 
         event.preventDefault()
         this.stream.getInput().onMouseDown(event, this.getStreamRect());
@@ -942,13 +961,12 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onTouchEnd(event: TouchEvent) {
+        this.onUserInteraction()
         if (this.consumeAutoFullscreenTouchGesture()) {
             event.preventDefault()
             event.stopPropagation()
             return
         }
-
-        this.onUserInteraction()
 
         event.preventDefault()
         this.stream.getInput().onTouchEnd(event, this.getStreamRect())
