@@ -168,6 +168,7 @@ export class Stream implements Component {
         Object.assign(streamInputConfig, {
             mouseMode: this.settings.mouseMode,
             mouseScrollMode: this.settings.mouseScrollMode,
+            scrollSensitivity: this.settings.scrollSensitivity,
             touchMode: this.settings.touchMode,
             localCursorSensitivity: this.settings.localCursorSensitivity,
             controllerConfig: this.settings.controllerConfig

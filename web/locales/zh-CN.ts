@@ -70,6 +70,7 @@ export const zhCN: Translations = {
         audioSampleQueueSize: "音频采样队列大小",
         mouse: "鼠标",
         scrollMode: "滚动模式",
+        scrollSensitivity: "滚动灵敏度",
         startupMouseMode: "串流启动后鼠标模式",
         startupTouchMode: "串流启动后触摸模式",
         localCursorSensitivity: "本地光标灵敏度",

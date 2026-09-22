@@ -264,6 +264,7 @@ class ViewerApp implements Component {
         Object.assign(this.inputConfig, {
             mouseMode: settings.mouseMode,
             mouseScrollMode: settings.mouseScrollMode,
+            scrollSensitivity: settings.scrollSensitivity,
             touchMode: settings.touchMode,
             localCursorSensitivity: settings.localCursorSensitivity,
             controllerConfig: settings.controllerConfig
@@ -982,7 +983,7 @@ class ViewerApp implements Component {
     }
     onMouseWheel(event: WheelEvent) {
         event.preventDefault()
-        this.stream.getInput().onMouseWheel(event)
+        this.stream.getInput().onMouseWheel(event, this.getStreamRect())
 
         event.stopPropagation()
     }
@@ -1407,6 +1408,8 @@ class ViewerSidebar implements Component, Sidebar {
     private exitStreamButton = document.createElement("button")
 
     private mouseMode: SelectComponent
+    private scrollMode: SelectComponent
+    private scrollSensitivity: SelectComponent
     private touchMode: SelectComponent
 
     constructor(app: ViewerApp) {
@@ -1520,6 +1523,18 @@ class ViewerSidebar implements Component, Sidebar {
         this.mouseMode.addChangeListener(this.onMouseModeChange.bind(this))
         this.mouseMode.mount(this.div)
 
+        this.scrollMode = new SelectComponent("liveScrollMode", [
+            { value: "highres", name: I.settings.highRes },
+            { value: "normal", name: I.settings.normal },
+        ], { displayName: I.settings.scrollMode, preSelectedOption: this.app.getInputConfig().mouseScrollMode })
+        this.scrollMode.addChangeListener(() => this.updateScrollSettings())
+        this.scrollMode.mount(this.div)
+        this.scrollSensitivity = new SelectComponent("liveScrollSensitivity", Array.from({ length: 16 }, (_, index) => (index + 1) / 4).map(value => ({ value: String(value), name: `${value}×` })), {
+            displayName: I.settings.scrollSensitivity, preSelectedOption: String(this.app.getInputConfig().scrollSensitivity),
+        })
+        this.scrollSensitivity.addChangeListener(() => this.updateScrollSettings())
+        this.scrollSensitivity.mount(this.div)
+
         // Select Touch Mode
         this.touchMode = new SelectComponent("touchMode", [
             { value: "touch", name: I.stream.touch },
@@ -1562,6 +1577,21 @@ class ViewerSidebar implements Component, Sidebar {
     }
 
     // -- Mouse Mode
+    private updateScrollSettings() {
+        const config = { ...this.app.getInputConfig(),
+            mouseScrollMode: this.scrollMode.getValue() === "normal" ? "normal" as const : "highres" as const,
+            scrollSensitivity: Number(this.scrollSensitivity.getValue()),
+        }
+        this.app.setInputConfig(config)
+        // Store only these preferences; don't overwrite unrelated settings.
+        try {
+            const saved = JSON.parse(localStorage.getItem("mlSettings") || "{}")
+            saved.mouseScrollMode = config.mouseScrollMode
+            saved.scrollSensitivity = config.scrollSensitivity
+            localStorage.setItem("mlSettings", JSON.stringify(saved))
+        } catch { /* live settings still work when storage is unavailable */ }
+    }
+
     private onMouseModeChange() {
         const config = this.app.getInputConfig()
         config.mouseMode = this.mouseMode.getValue() as any

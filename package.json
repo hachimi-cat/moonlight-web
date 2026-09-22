@@ -22,7 +22,7 @@
     "url": "This is required for uniffi-bindgen-react-native"
   },
   "scripts": {
-    "test:stream-ui": "node tests/control-recovery.mjs && node tests/game-exit-recovery.mjs && node tests/stream-ui.mjs && node tests/stream-activation.mjs && node tests/game-exit.mjs",
+    "test:stream-ui": "node tests/scroll-input.mjs && node tests/control-recovery.mjs && node tests/game-exit-recovery.mjs && node tests/stream-ui.mjs && node tests/stream-activation.mjs && node tests/game-exit.mjs && node tests/stream-scroll.mjs",
     "dev": "npm run prebuild && webpack --watch",
     "build": "npm run prebuild && webpack",
     "prebuild": "npm run generate-bindings && npm run build-moonlight-common",

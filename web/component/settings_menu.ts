@@ -1,5 +1,6 @@
 import { ControllerConfig } from "../stream/gamepad"
 import { MouseMode, MouseScrollMode, TouchMode } from "../stream/input"
+import { validScrollSensitivity } from "../stream/scroll"
 import { PageStyle } from "../styles/index"
 import { getLanguageOptions, getTranslations, Language, normalizeLanguage } from "../i18n"
 import { Component, ComponentEvent } from "./index"
@@ -26,6 +27,7 @@ export type Settings = {
     playAudioLocal: boolean
     audioSampleQueueSize: number
     mouseScrollMode: MouseScrollMode
+    scrollSensitivity: number
     mouseMode: MouseMode
     touchMode: TouchMode
     localCursorSensitivity: number
@@ -102,6 +104,8 @@ export function getLocalStreamSettings(defaultSettings: Settings) {
         settings.pageStyle = "moonlight"
     }
 
+    settings.scrollSensitivity = validScrollSensitivity(settings.scrollSensitivity)
+    settings.mouseScrollMode = settings.mouseScrollMode === "normal" ? "normal" : "highres"
     return settings
 }
 export function setLocalStreamSettings(settings?: Settings) {
@@ -177,6 +181,7 @@ export class StreamSettingsComponent implements Component {
 
     private mouseHeader: HTMLHeadingElement = document.createElement("h3")
     private mouseScrollMode: SelectComponent
+    private scrollSensitivity: InputComponent
     private mouseMode: SelectComponent
     private touchMode: SelectComponent
     private localCursorSensitivity: InputComponent
@@ -425,6 +430,13 @@ export class StreamSettingsComponent implements Component {
         this.mouseScrollMode.addChangeListener(this.onSettingsChange.bind(this))
         this.mouseScrollMode.mount(this.divElement)
 
+        this.scrollSensitivity = new InputComponent("scrollSensitivity", "number", i.scrollSensitivity, {
+            defaultValue: "1", value: settings?.scrollSensitivity?.toString(), step: "0.25",
+            numberSlider: { range_min: 0.25, range_max: 4 },
+        })
+        this.scrollSensitivity.addChangeListener(this.onSettingsChange.bind(this))
+        this.scrollSensitivity.mount(this.divElement)
+
         this.mouseMode = new SelectComponent("mouseMode",
             [
                 { value: "relative", name: streamI.relative },
@@ -627,6 +639,7 @@ export class StreamSettingsComponent implements Component {
         settings.audioSampleQueueSize = parseInt(this.audioSampleQueueSize.getValue())
 
         settings.mouseScrollMode = this.mouseScrollMode.getValue() as any
+        settings.scrollSensitivity = validScrollSensitivity(parseFloat(this.scrollSensitivity.getValue()))
         settings.mouseMode = this.mouseMode.getValue() as MouseMode
         settings.touchMode = this.touchMode.getValue() as TouchMode
         settings.localCursorSensitivity = parseFloat(this.localCursorSensitivity.getValue())

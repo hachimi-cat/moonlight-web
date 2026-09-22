@@ -5,6 +5,7 @@ import { StreamCapabilities } from "./index"
 import { convertToKey, convertToModifiers, emptyKeyModifiers } from "./keyboard"
 import { convertToButton } from "./mouse"
 import { IControlStream } from "./transport/index"
+import { WheelScroll, MouseScrollMode, validScrollSensitivity } from "./scroll"
 
 // Normal scrolling multiplier
 const TOUCH_SCROLL_MULTIPLIER = 1
@@ -25,12 +26,14 @@ const DOUBLE_TAP_SECOND_TAP_MAX_TIME_MS = 200
 
 const CONTROLLER_RUMBLE_INTERVAL_MS = 60
 
-export type MouseScrollMode = "highres" | "normal"
+export type { MouseScrollMode } from "./scroll"
 export type MouseMode = "relative" | "follow" | "localCursor" | "pointAndDrag"
 export type TouchMode = "touch" | "mouseRelative" | "localCursor" | "pointAndDrag"
 
 export type StreamInputConfig = {
     mouseMode: MouseMode
+    mouseScrollMode: MouseScrollMode
+    scrollSensitivity: number
     touchMode: TouchMode
     localCursorSensitivity: number
     controllerConfig: ControllerConfig
@@ -46,6 +49,8 @@ type TrackedGamepad = {
 export function defaultStreamInputConfig(): StreamInputConfig {
     return {
         mouseMode: "follow",
+        mouseScrollMode: "highres",
+        scrollSensitivity: 1,
         touchMode: "mouseRelative",
         localCursorSensitivity: 1,
         controllerConfig: {
@@ -75,6 +80,7 @@ export class StreamInput {
     buffer: any
 
     private streamSize: [number, number] = [0, 0]
+    private wheelScroll = new WheelScroll()
 
     constructor(config?: StreamInputConfig) {
         this.config = defaultStreamInputConfig()
@@ -91,7 +97,12 @@ export class StreamInput {
     }
 
     setConfig(config: StreamInputConfig) {
+        if (config.mouseScrollMode !== this.config.mouseScrollMode || config.scrollSensitivity !== this.config.scrollSensitivity) {
+            this.wheelScroll.reset()
+        }
         Object.assign(this.config, config)
+        this.config.mouseScrollMode = config.mouseScrollMode === "normal" ? "normal" : "highres"
+        this.config.scrollSensitivity = validScrollSensitivity(config.scrollSensitivity)
 
         // Touch
         this.primaryTouch = null
@@ -217,6 +228,7 @@ export class StreamInput {
     }
 
     raiseAllKeys() {
+        this.wheelScroll.reset()
         for (const key of this.pressedKeys) {
             this.sendKey(false, key, emptyKeyModifiers())
         }
@@ -289,8 +301,12 @@ export class StreamInput {
             }
         }
     }
-    onMouseWheel(event: WheelEvent) {
-        this.sendAccumulatedScroll(event.deltaX, -event.deltaY)
+    onMouseWheel(event: WheelEvent, viewport = { width: 1, height: 1 }) {
+        const scroll = this.wheelScroll.take(event, viewport, this.config.mouseScrollMode, this.config.scrollSensitivity)
+        if (scroll && (scroll.x || scroll.y)) this.sendMouseWheel(scroll.x, scroll.y)
+    }
+    getScrollDiagnostics() {
+        return this.wheelScroll.diagnostics(this.config.mouseScrollMode, this.config.scrollSensitivity)
     }
 
     sendMouseMove(movementX: number, movementY: number) {
@@ -392,10 +408,10 @@ export class StreamInput {
         }))
     }
     sendMouseWheel(deltaX: number, deltaY: number) {
-        this.controlStream?.send(new ClientInputEvent.MouseScrollHorizontal({
+        if (deltaX) this.controlStream?.send(new ClientInputEvent.MouseScrollHorizontal({
             scrollX: deltaX
         }))
-        this.controlStream?.send(new ClientInputEvent.MouseScrollVertical({
+        if (deltaY) this.controlStream?.send(new ClientInputEvent.MouseScrollVertical({
             scrollY: deltaY
         }))
     }

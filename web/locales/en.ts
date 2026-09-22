@@ -68,6 +68,7 @@ export const en = {
         audioSampleQueueSize: "Audio Sample Queue Size",
         mouse: "Mouse",
         scrollMode: "Scroll Mode",
+        scrollSensitivity: "Scroll Sensitivity",
         startupMouseMode: "Mouse Mode On Stream Start",
         startupTouchMode: "Touch Mode On Stream Start",
         localCursorSensitivity: "Local Cursor Sensitivity",

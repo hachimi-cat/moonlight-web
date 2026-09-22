@@ -70,6 +70,7 @@ export const koKR: Translations = {
         audioSampleQueueSize: "오디오 샘플 대기열 크기",
         mouse: "마우스",
         scrollMode: "스크롤 모드",
+        scrollSensitivity: "스크롤 감도",
         startupMouseMode: "스트리밍 시작 시 마우스 모드",
         startupTouchMode: "스트리밍 시작 시 터치 모드",
         localCursorSensitivity: "로컬 커서 감도",

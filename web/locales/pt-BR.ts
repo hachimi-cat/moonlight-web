@@ -70,6 +70,7 @@ export const ptBR: Translations = {
         audioSampleQueueSize: "Tamanho da Fila de Amostras de Áudio",
         mouse: "Mouse",
         scrollMode: "Modo de Rolagem",
+        scrollSensitivity: "Sensibilidade da rolagem",
         startupMouseMode: "Modo do Mouse ao Iniciar Stream",
         startupTouchMode: "Modo de Toque ao Iniciar Stream",
         localCursorSensitivity: "Sensibilidade do Cursor Local",

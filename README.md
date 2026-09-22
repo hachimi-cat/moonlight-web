@@ -258,6 +258,18 @@ There are a few important things to be aware of when using WebSockets for stream
     ```
   - The decoder will be detected and used automatically.
 
+### Trackpad and mouse-wheel scrolling (Pawpado)
+
+The stream sidebar provides **Scroll Mode** and **Scroll Sensitivity** controls.
+Changes apply immediately and persist in this browser. **High Res** preserves
+fine trackpad movement; **Normal** sends whole 120-unit wheel notches for apps
+that require them. Sensitivity ranges from 0.25× to 4×, with a 1× default.
+Wheel events are normalized by their pixel, line, or page units; neither stream
+resolution nor device-pixel ratio increases the scroll speed.
+
+These settings do not hide either cursor or enable pointer lock. In particular,
+iPad Safari's local-pointer limitations are separate from scrolling.
+
 ## Config
 The config file is under `server/config.json` relative to the executable.
 Here are the most important settings for configuring Moonlight Web.

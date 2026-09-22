@@ -70,6 +70,7 @@ export const frFr: Translations = {
         audioSampleQueueSize: "Taille de la file d'attente audio",
         mouse: "Souris",
         scrollMode: "Mode de défilement",
+        scrollSensitivity: "Sensibilité du défilement",
         startupMouseMode: "Mode de la souris au démarrage",
         startupTouchMode: "Mode tactile au démarrage",
         localCursorSensitivity: "Sensibilité du curseur local",
