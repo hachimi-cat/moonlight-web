@@ -12,7 +12,7 @@ export class WebRTCTransport implements Transport {
 
     readonly implementationName: string = "webrtc"
 
-    readonly controlStream = new WebRtcControlStream()
+    readonly controlStream: WebRtcControlStream
     onconnect: ((connectData: TransportConnectData) => void) | null = null
     onclose: ((shutdown: TransportShutdown) => void) | null = null
 
@@ -23,8 +23,40 @@ export class WebRTCTransport implements Transport {
     private peer: RTCPeerConnection
     private location: string | null = null
 
-    constructor(api: Api, configuration: RTCConfiguration, logger?: Logger) {
+    /**
+     * A WebRTC peer can remain `connected` after its media path has stopped.
+     * The data channel and ICE consent checks still succeed in that state,
+     * so connectionstatechange never gives the viewer a chance to recover.
+     * Watch cumulative RTP counters and deliberately renegotiate instead of
+     * leaving a frozen last frame on screen forever.
+     */
+    private mediaWatchdogTimer: number | null = null
+    private mediaReceived = false
+    private lastMediaPacketCount: number | null = null
+    private lastMediaProgressAt = 0
+    private lastVideoFramesDecoded: number | null = null
+    private lastVideoFrameProgressAt = 0
+    private shutdownSignaled = false
+    private mediaWatchdogRunning = false
+    private preserveMoonlightSession: boolean
+    private iceRestartRunning = false
+    private recoverySuspended = false
+
+    private static readonly MEDIA_WATCHDOG_INTERVAL_MS = 2000
+    private static readonly MEDIA_STALL_MS = 8000
+    // DirectX games can briefly stop producing complete desktop-duplication
+    // frames while entering/exiting exclusive fullscreen. BioShock Infinite
+    // takes roughly 9-10 seconds on the Pawpado A10G host; treating that as a
+    // dead transport at four seconds creates a reconnect/mode-switch loop and
+    // leaves the player with audio over a black picture. Packet-total stalls
+    // still recover at 8 seconds; allow a longer grace only when partial RTP
+    // or audio continues but no complete video frame is decoded.
+    private static readonly VIDEO_FRAME_STALL_MS = 15000
+
+    constructor(api: Api, configuration: RTCConfiguration, logger?: Logger, preserveMoonlightSession: boolean = false) {
         this.logger = logger
+        this.preserveMoonlightSession = preserveMoonlightSession
+        this.controlStream = new WebRtcControlStream(logger)
 
         this.api = api
 
@@ -144,6 +176,7 @@ export class WebRTCTransport implements Transport {
     private onStateChange() {
         if (this.peer.connectionState == "connected") {
             this.wasConnected = true
+            this.startMediaWatchdog()
 
             this.generateConnectData().then(connectData => {
                 if (this.onconnect) {
@@ -151,11 +184,235 @@ export class WebRTCTransport implements Transport {
                 }
             })
         } else if (this.peer.connectionState == "failed" || this.peer.connectionState == "closed") {
+            this.stopMediaWatchdog()
             const shutdown = this.wasConnected ? "failed" : "failednoconnect"
 
-            if (this.onclose) {
-                this.onclose(shutdown)
+            this.signalShutdown(shutdown)
+        }
+    }
+
+    private signalShutdown(shutdown: TransportShutdown) {
+        if (this.shutdownSignaled) {
+            return
+        }
+        this.shutdownSignaled = true
+        this.onclose?.(shutdown)
+    }
+
+    private startMediaWatchdog() {
+        if (this.mediaWatchdogTimer != null || this.recoverySuspended || this.shutdownSignaled) {
+            return
+        }
+        this.lastMediaProgressAt = Date.now()
+        this.lastVideoFrameProgressAt = this.lastMediaProgressAt
+        this.mediaWatchdogTimer = globalObject().setInterval(
+            () => void this.checkMediaProgress(),
+            WebRTCTransport.MEDIA_WATCHDOG_INTERVAL_MS,
+        )
+    }
+
+    private stopMediaWatchdog() {
+        if (this.mediaWatchdogTimer != null) {
+            globalObject().clearInterval(this.mediaWatchdogTimer)
+            this.mediaWatchdogTimer = null
+        }
+    }
+
+    suspendRecovery() {
+        this.recoverySuspended = true
+        this.stopMediaWatchdog()
+    }
+
+    private async checkMediaProgress() {
+        if (this.mediaWatchdogRunning || this.shutdownSignaled || this.recoverySuspended || this.peer.connectionState != "connected") {
+            return
+        }
+        this.mediaWatchdogRunning = true
+        try {
+            const stats = await this.peer.getStats()
+            if (this.recoverySuspended || this.shutdownSignaled) return
+            let mediaPacketCount = 0
+            let videoReceived: number | null = null
+            let videoFramesDecoded: number | null = null
+
+            for (const [_key, value] of stats) {
+                if (value.type != "inbound-rtp") {
+                    continue
+                }
+                if (typeof value.packetsReceived == "number") {
+                    mediaPacketCount += value.packetsReceived
+                }
+                if (value.kind == "video") {
+                    videoReceived = typeof value.packetsReceived == "number" ? value.packetsReceived : null
+                    videoFramesDecoded = typeof value.framesDecoded == "number" ? value.framesDecoded : null
+                }
             }
+
+            const now = Date.now()
+            if (this.lastMediaPacketCount == null || mediaPacketCount > this.lastMediaPacketCount) {
+                if (mediaPacketCount > 0) {
+                    this.mediaReceived = true
+                }
+                this.lastMediaProgressAt = now
+            }
+
+            // Packet loss while ICE is still connected is congestion, not a
+            // dead route. Restarting ICE cannot choose a different path here
+            // (the same host/prflx UDP pair wins again), and every restart
+            // closes the active socket while the host is still writing RTP.
+            // In production that turned one lossy two-second interval into a
+            // reconnect every 5-20 seconds plus thousands of WSAENETUNREACH
+            // send failures. Let WebRTC congestion control, NACK and FEC do
+            // their jobs; recover only when media actually stops progressing.
+
+            if (videoFramesDecoded != null) {
+                if (this.lastVideoFramesDecoded == null
+                    || videoFramesDecoded > this.lastVideoFramesDecoded
+                ) {
+                    this.lastVideoFrameProgressAt = now
+                }
+
+                this.lastVideoFramesDecoded = videoFramesDecoded
+
+                // Audio or partial video RTP can keep the aggregate packet
+                // counter advancing while the browser receives no complete
+                // video frames. Treat that as a video stall instead of
+                // leaving the user on an increasingly stale picture.
+                if (this.mediaReceived && videoReceived != null && videoReceived > 0
+                    && document.visibilityState == "visible"
+                    && now - this.lastVideoFrameProgressAt >= WebRTCTransport.VIDEO_FRAME_STALL_MS
+                ) {
+                    this.logger?.debug(
+                        `WebRTC video decoded no complete frames for ` +
+                        `${WebRTCTransport.VIDEO_FRAME_STALL_MS}ms; reconnecting`,
+                    )
+                    await this.closeForRecovery("stalled")
+                    return
+                }
+            }
+
+            this.lastMediaPacketCount = mediaPacketCount
+
+            // Timers are throttled in background tabs. Only declare a stall
+            // while visible; when the tab returns, the next progressing
+            // sample refreshes the clock without disrupting the session.
+            if (this.mediaReceived && document.visibilityState == "visible"
+                && now - this.lastMediaProgressAt >= WebRTCTransport.MEDIA_STALL_MS
+            ) {
+                this.logger?.debug(
+                    `WebRTC media received no packets for ${WebRTCTransport.MEDIA_STALL_MS}ms; reconnecting`,
+                )
+                await this.closeForRecovery("stalled")
+            }
+        } catch (error) {
+            this.logger?.debug(`failed to sample WebRTC media health: ${error}`)
+        } finally {
+            this.mediaWatchdogRunning = false
+        }
+    }
+
+    private async closeForRecovery(reason: "degraded" | "stalled") {
+        if (this.shutdownSignaled || this.recoverySuspended) {
+            return
+        }
+
+        if (this.preserveMoonlightSession) {
+            await this.restartIceInPlace(reason)
+            return
+        }
+
+        // Suppress connectionstatechange while deliberately closing. Wait
+        // for the server-side Moonlight stream to be deleted before asking
+        // it to resume the same app, otherwise the two negotiations race.
+        this.shutdownSignaled = true
+        this.stopMediaWatchdog()
+        this.peer.close()
+        const location = this.location
+        this.location = null
+        try {
+            if (location) {
+                await fetchApi(this.api, location, "DELETE", {
+                    keepalive: true,
+                    noUrlModify: true,
+                    response: "ignore",
+                })
+            }
+        } catch (error) {
+            this.logger?.debug(`failed to close stalled WebRTC transport: ${error}`)
+        }
+        this.onclose?.(reason)
+    }
+
+    /**
+     * Repair a dead browser-facing RTP route without deleting the WHEP
+     * resource. The server renegotiates the existing RTCPeerConnection, so
+     * its Moonlight connection to Apollo and the already-created ViGEm pad
+     * never go away.
+     */
+    private async restartIceInPlace(reason: "degraded" | "stalled") {
+        if (this.iceRestartRunning || !this.location || this.recoverySuspended || this.shutdownSignaled) {
+            return
+        }
+        this.iceRestartRunning = true
+        this.stopMediaWatchdog()
+
+        try {
+            if (this.iceCandidateSendTimer != null) {
+                globalObject().clearTimeout(this.iceCandidateSendTimer)
+                this.iceCandidateSendTimer = null
+            }
+            this.pendingIceCandidates = []
+
+            this.logger?.debug(
+                `WebRTC media ${reason}; restarting ICE without disconnecting the controller`,
+                { type: "recover" },
+            )
+            const offer = await this.peer.createOffer({ iceRestart: true })
+            if (this.recoverySuspended || this.shutdownSignaled) return
+            await this.peer.setLocalDescription(offer)
+            if (this.recoverySuspended || this.shutdownSignaled) return
+            if (!offer.sdp) {
+                throw new Error("ICE restart offer contained no SDP")
+            }
+
+            const response = await fetchApi(this.api, this.location, "PATCH", {
+                noUrlModify: true,
+                sdp: offer.sdp,
+                response: "ignore",
+            }, 20000)
+            if (this.recoverySuspended || this.shutdownSignaled) return
+            const answerSdp = await response.text()
+            if (this.recoverySuspended || this.shutdownSignaled) return
+            await this.peer.setRemoteDescription({ type: "answer", sdp: answerSdp })
+            if (this.recoverySuspended || this.shutdownSignaled) return
+
+            // Reset the health baseline. If the repaired route still carries
+            // no media, the watchdog will retry after a fresh stall window.
+            const now = Date.now()
+            this.mediaReceived = false
+            this.lastMediaPacketCount = null
+            this.lastMediaProgressAt = now
+            this.lastVideoFramesDecoded = null
+            this.lastVideoFrameProgressAt = now
+            this.logger?.debug(
+                "WebRTC ICE restart completed; controller session preserved",
+                { type: "recover" },
+            )
+        } catch (error) {
+            if (this.recoverySuspended || this.shutdownSignaled) return
+            // Do not fall through to DELETE+POST for a controller launch: that
+            // is exactly what migrates the virtual pad to another XInput slot.
+            // Leave the peer in place and retry after the next stall window.
+            const now = Date.now()
+            this.lastMediaProgressAt = now
+            this.lastVideoFrameProgressAt = now
+            this.logger?.debug(
+                `in-place WebRTC ICE restart failed: ${error}`,
+                { type: "recover" },
+            )
+        } finally {
+            this.iceRestartRunning = false
+            this.startMediaWatchdog()
         }
     }
 
@@ -222,9 +479,17 @@ export class WebRTCTransport implements Transport {
     }
 
     private onTrack(event: RTCTrackEvent) {
-        event.receiver.jitterBufferTarget = 0
+        // Pawpado can request a tiny playout cushion. Its diagnostics showed
+        // clean direct UDP and zero packet loss while a forced zero buffer
+        // still ran out of frames, producing visible 33–50 ms cadence gaps.
+        // Keep upstream's latency-first zero default for every other caller.
+        const requestedBufferMs = Number(new URLSearchParams(location.search).get("pawpadoJitterBufferMs"))
+        const jitterBufferMs = Number.isFinite(requestedBufferMs)
+            ? Math.max(0, Math.min(200, requestedBufferMs))
+            : 0
+        event.receiver.jitterBufferTarget = jitterBufferMs
         if ("playoutDelayHint" in event.receiver) {
-            event.receiver.playoutDelayHint = 0
+            event.receiver.playoutDelayHint = jitterBufferMs / 1000
         }
         const track = event.track
 
@@ -278,12 +543,17 @@ export class WebRTCTransport implements Transport {
     }
 
     async close(): Promise<void> {
+        this.suspendRecovery()
+        this.controlStream.setChannel(null)
+
         // Close the peer
         this.peer.close()
 
         // Delete our current session on the server
-        if (this.location) {
-            await fetchApi(this.api, this.location, "DELETE", {
+        const location = this.location
+        this.location = null
+        if (location) {
+            await fetchApi(this.api, location, "DELETE", {
                 keepalive: true,
                 noUrlModify: true,
                 response: "ignore",
@@ -320,16 +590,21 @@ export class WebRTCTransport implements Transport {
         const out: Record<string, StatValue> = {}
 
         // Control Stream
-        const estimatedRtt = this.controlStream.estimatedRtt()
-        if (estimatedRtt) {
-            out.estimatedClientToRelayRttMs = estimatedRtt.rtt
-            out.estimatedClientToRelayRttVarianceMs = estimatedRtt.rttVariance
+        try {
+            const estimatedRtt = this.controlStream.estimatedRtt()
+            if (estimatedRtt) {
+                out.estimatedClientToRelayRttMs = estimatedRtt.rtt
+                out.estimatedClientToRelayRttVarianceMs = estimatedRtt.rttVariance
+            }
+        } catch (error) {
+            // Stats are observational. A transient ENet error during an ICE
+            // restart must not become an unhandled notification over the game.
+            this.logger?.debug(`control RTT temporarily unavailable: ${error}`)
         }
 
         const stats = await this.peer.getStats()
 
         for (const [_key, value] of stats) {
-            console.debug(value)
 
             // Video Stream
             if ("type" in value && "kind" in value
@@ -387,9 +662,11 @@ class WebRtcControlStream implements IControlStream {
     // Enet control stream
     private controlStream: ControlStream | null = null
     private controlStreamPollTimeout: number | null = null
+    private controlReconnectTimer: number | null = null
     private enetConnected = false
 
     private packetBuffer: Array<ControlPacket> = []
+    private lastChannelSendFailureAt = 0
 
     constructor(logger?: Logger) {
         this.logger = logger
@@ -398,6 +675,9 @@ class WebRtcControlStream implements IControlStream {
     setChannel(channel: null): void
     setChannel(channel: RTCDataChannel, streamType: "simple" | "enet", config: ControlPacketConfig): void
     setChannel(channel: RTCDataChannel | null, streamType?: "simple" | "enet", config?: ControlPacketConfig): void {
+        // Detach from the old channel before replacing/nulling the reference.
+        this.channel?.removeEventListener("open", this.boundChannelStateChange)
+        this.channel?.removeEventListener("message", this.boundMessage)
         this.channel = channel
 
         // Clean up old control stream if present
@@ -407,6 +687,11 @@ class WebRtcControlStream implements IControlStream {
         }
         if (this.controlStreamPollTimeout != null) {
             globalObject().clearTimeout(this.controlStreamPollTimeout)
+            this.controlStreamPollTimeout = null
+        }
+        if (this.controlReconnectTimer != null) {
+            globalObject().clearTimeout(this.controlReconnectTimer)
+            this.controlReconnectTimer = null
         }
         this.enetConnected = false
 
@@ -430,8 +715,7 @@ class WebRtcControlStream implements IControlStream {
             this.trySendBufferedPackets()
         } else {
             this.streamType = "simple"
-            this.channel?.removeEventListener("open", this.boundChannelStateChange)
-            this.channel?.removeEventListener("message", this.boundMessage)
+            this.packetBuffer = []
         }
     }
 
@@ -454,13 +738,12 @@ class WebRtcControlStream implements IControlStream {
                 throw "dropping packet because enet control stream is not initialized"
             }
 
-            this.controlStream.handleReceive(
-                uniffiNow(),
-                ENET_IP,
-                event.data
-            )
-
-            this.controlStreamPollOutput(false)
+            try {
+                this.controlStream.handleReceive(uniffiNow(), ENET_IP, event.data)
+                this.controlStreamPollOutput(false)
+            } catch (error) {
+                this.scheduleControlReconnect(error)
+            }
         } else {
             this.logger?.debug("failed to deserialize packet")
             console.debug("failed to deserialize packet", event.data)
@@ -502,12 +785,13 @@ class WebRtcControlStream implements IControlStream {
     }
 
     sendRaw(packet: ControlPacket): void {
-        console.debug(packet, "sending control packet")
 
         if (
             !this.channel || this.channel.readyState != "open" ||
             (this.streamType == "enet" && (!this.controlStream || !this.enetConnected))
         ) {
+            // A broken control path must not accumulate minutes of old input.
+            if (this.packetBuffer.length >= 256) this.packetBuffer.shift()
             this.packetBuffer.push(packet)
             return
         }
@@ -519,12 +803,26 @@ class WebRtcControlStream implements IControlStream {
 
         if (this.streamType == "simple") {
             const data = controlPacketSerialize(this.config, packet)
-            console.debug(data, "sending control data")
-            if (data) {
-                this.channel.send(data)
+            // Same closed-channel guard as controlStreamPollOutput.
+            if (data && this.channel.readyState == "open") {
+                this.sendChannelData(data)
             }
         } else if (this.streamType == "enet") {
-            this.controlStream?.sendRaw(packet)
+            // The ENet WASM layer can reject input while ICE is restarting
+            // even though the RTCDataChannel still reports `open`. Treat it
+            // like the adjacent channel.send failure instead of surfacing an
+            // uncaught ControlStreamError for every mouse/gamepad packet.
+            try {
+                this.controlStream?.sendRaw(packet)
+            } catch (error) {
+                const now = Date.now()
+                if (now - this.lastChannelSendFailureAt >= 5000) {
+                    this.lastChannelSendFailureAt = now
+                    this.logger?.debug(`control stream temporarily unwritable: ${error}`)
+                }
+                this.scheduleControlReconnect(error)
+                return
+            }
             this.controlStreamPollOutput()
         } else {
             this.logger?.debug(`failed to send control packet ${JSON.stringify(packet)}`)
@@ -543,12 +841,39 @@ class WebRtcControlStream implements IControlStream {
 
     private boundPollOutput = this.controlStreamPollOutput.bind(this)
     private controlStreamPollOutput(handleInput = true) {
+        try {
+            this.pollControlStream(handleInput)
+        } catch (error) {
+            // The UniFFI protocol may throw NotConnected on timeout before
+            // publishing Disconnect. Never let that kill the timer pump.
+            this.scheduleControlReconnect(error)
+        }
+    }
+
+    private scheduleControlReconnect(reason: unknown) {
+        if (this.controlReconnectTimer != null || this.streamType !== "enet"
+            || !this.config || this.channel?.readyState !== "open") return
+        this.enetConnected = false
+        if (this.controlStreamPollTimeout != null) {
+            globalObject().clearTimeout(this.controlStreamPollTimeout)
+            this.controlStreamPollTimeout = null
+        }
+        this.logger?.debug(`repairing browser control protocol on the existing data channel: ${reason}`)
+        this.controlReconnectTimer = globalObject().setTimeout(() => {
+            this.controlReconnectTimer = null
+            if (this.channel?.readyState === "open" && this.config) {
+                this.setChannel(this.channel, "enet", this.config)
+            }
+        }, 250)
+    }
+
+    private pollControlStream(handleInput = true) {
         if (this.controlStreamPollTimeout != null) {
             globalObject().clearTimeout(this.controlStreamPollTimeout)
         }
         this.controlStreamPollTimeout = null
 
-        if (!this.controlStream) {
+        if (!this.controlStream || this.controlReconnectTimer != null) {
             return
         }
         if (!this.channel) {
@@ -559,10 +884,18 @@ class WebRtcControlStream implements IControlStream {
             this.controlStream.handleTimeout(uniffiNow())
         }
 
+        // This runs off a timer, so it keeps firing after the peer is gone.
+        // send() on a non-open RTCDataChannel throws InvalidStateError, and
+        // because nothing here catches it, that throw escaped as an uncaught
+        // error at the end of every stream — the "object is in an invalid
+        // state" players were seeing when they quit a game.
+        if (this.channel.readyState != "open") {
+            return
+        }
+
         let send: UdpTransmit | undefined
         while (send = this.controlStream.pollPacket()) {
-            console.debug(send.contents, "enet send")
-            this.channel.send(send.contents)
+            this.sendChannelData(send.contents)
         }
 
         let event: ControlStreamEvent | undefined
@@ -576,20 +909,39 @@ class WebRtcControlStream implements IControlStream {
                     this.onreceive(event.inner[0]);
                 }
             } else if (event.tag === ControlStreamEvent_Tags.Disconnect) {
-                this.logger?.debug("control stream got disconnected for an unknown reason, constructing with new client control stream")
-                this.enetConnected = false
-
-                if (this.config) {
-                    this.setChannel(this.channel, "enet", this.config)
-                } else {
-                    this.logger?.debug("failed to reconstruct new client control stream because of missing packet config")
-                }
+                // Do not recursively replace the protocol inside its event
+                // loop: the outer pump would then reschedule a second timer.
+                this.scheduleControlReconnect("disconnect")
+                return
             }
         }
 
         const timeout = this.controlStream.pollTimeout()
         if (timeout != undefined) {
             this.controlStreamPollTimeout = globalObject().setTimeout(this.boundPollOutput, uniffiMillisUntil(timeout))
+        }
+    }
+
+    /** RTCDataChannel.send() can throw while ICE is being repaired even when
+     * readyState still says open. Do not turn high-rate mouse input into a
+     * screen-covering flood of uncaught-error notifications. ENet will retry
+     * reliable control packets after the channel becomes writable again. */
+    private sendChannelData(data: ArrayBuffer | ArrayBufferView) {
+        try {
+            if (!this.channel) return
+            if (data instanceof ArrayBuffer) {
+                this.channel.send(data)
+            } else {
+                // UniFFI exposes Uint8Array<ArrayBufferLike>; browser WASM
+                // buffers are ordinary ArrayBuffers, matching RTCDataChannel.
+                this.channel.send(data as ArrayBufferView<ArrayBuffer>)
+            }
+        } catch (error) {
+            const now = Date.now()
+            if (now - this.lastChannelSendFailureAt >= 5000) {
+                this.lastChannelSendFailureAt = now
+                this.logger?.debug(`control data channel temporarily unwritable: ${error}`)
+            }
         }
     }
 }

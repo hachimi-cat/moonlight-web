@@ -48,10 +48,21 @@ export abstract class AudioContextBasePipe implements NodeAudioPlayer {
         this.audioContext?.close()
     }
 
-    onUserInteraction(): void {
+    onUserInteraction(): Promise<void> {
+        // A context created before any user gesture starts 'suspended' —
+        // currentTime frozen, output silent — and nothing unfreezes it
+        // except a resume() issued from a gesture. Whether it starts
+        // suspended depends on the browser's autoplay-policy state, which
+        // is why the silence was intermittent.
+        const resume = this.audioContext && this.audioContext.state != "running"
+            ? this.audioContext.resume() : Promise.resolve()
+        let base: unknown
         if (this.base && "onUserInteraction" in this.base && typeof this.base.onUserInteraction == "function") {
-            return this.base.onUserInteraction(...arguments)
+            base = this.base.onUserInteraction(...arguments)
         }
+        return Promise.all([resume, base]).then(() => {
+            if (!this.audioContext || this.audioContext.state != "running") throw new Error("Audio is not running")
+        })
     }
 
     abstract setSource(source: AudioNode): void

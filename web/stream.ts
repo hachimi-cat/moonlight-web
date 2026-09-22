@@ -1,13 +1,13 @@
 import "./polyfill/index"
 import "./styles/index"
-import { Api, apiGetRole, getApi } from "./api"
+import { Api, PawpadoLaunchState, apiGetHost, apiGetPawpadoLaunchState, apiGetRole, apiHostCancel, getApi } from "./api"
 import { Component } from "./component/index"
 import { showNotification } from "./component/notification"
-import { getModalBackground, Modal, showMessage, showModal } from "./component/modal/index"
+import { getModalBackground, showMessage, showModal } from "./component/modal/index"
 import { getSidebarRoot, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index"
 import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig } from "./stream/input"
 import { getLocalStreamSettings, Settings, TransportType } from "./component/settings_menu"
-import { SelectComponent } from "./component/input"
+import { ShadcnSelectComponent as SelectComponent } from "./ui/shadcn-select"
 import { emptyKeyModifiers } from "./stream/keyboard"
 import { LogLevel, setLogger as uniffiSetLogger, Logger as UniffiLogger, uniffiInitAsync } from "./uniffi/entry"
 import { DetailedRole, StreamKeys } from "./api_bindings"
@@ -17,16 +17,41 @@ import { streamStatsToText } from "./stream/stats"
 import { adoptRoleDefaultLanguage, getCurrentLanguage, getTranslations, Language, normalizeLanguage } from "./i18n"
 import { requestKeyboardLock } from "./iframe"
 import { InfoEvent, Stream, StreamCapabilities } from "./stream/index"
-import { LogMessageType } from "./stream/log"
+import { ConnectionInfoModal } from "./component/connection_info_modal"
+import { wait } from "./util"
+import { PawpadoLaunchOverlay, parsePawpadoGamePresentation } from "./component/pawpado_launch_overlay"
+import { stopPropagationOn } from "./component/input_boundary"
 
 let I = getTranslations(getCurrentLanguage())
+
+function isIOSWebKit(): boolean {
+    const ua = navigator.userAgent
+    return /iPad|iPhone|iPod/i.test(ua) ||
+        (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1)
+}
 
 async function startApp() {
     const uniffiInit = uniffiInitAsync()
 
-    const api = await getApi()
-
     const queryParams = new URLSearchParams(location.search)
+    const gamePresentation = parsePawpadoGamePresentation(queryParams)
+    const launchOverlay = gamePresentation
+        ? new PawpadoLaunchOverlay(gamePresentation)
+        : null
+    if (launchOverlay) {
+        if (document.body) launchOverlay.mount(document.body)
+        else document.addEventListener("DOMContentLoaded", () => launchOverlay.mount(document.body), { once: true })
+    }
+
+    const api = await getApi()
+    // Snapshot the previous launch before this page asks Apollo to start
+    // anything. The on-box state file survives between games; without this
+    // baseline an immediate replay can mistake the previous run's `running`
+    // or `exited` marker for the new one and uncover/abort the loading UI.
+    const launchStateBaseline = launchOverlay
+        ? await apiGetPawpadoLaunchState(api).catch(() => null)
+        : null
+
     let lang = parseLanguageFromQuery(queryParams)
     const bootstrapRole = await apiGetRole(api, { id: null })
     if (!lang) {
@@ -66,6 +91,7 @@ async function startApp() {
 
     // Wait for uniffi to finish it's initialization
     await uniffiInit
+
     // Set Uniffy Logger
     class CustomUniffiLogger implements UniffiLogger {
         log(level: LogLevel, message: string): void {
@@ -88,11 +114,12 @@ async function startApp() {
             }
         }
     }
-    // TODO: check for prod or dev env
-    uniffiSetLogger(new CustomUniffiLogger(), LogLevel.Debug)
+    // Protocol debug logging includes every controller/mouse packet. Keep
+    // the normal streaming hot path free of console/WASM log allocations.
+    uniffiSetLogger(new CustomUniffiLogger(), LogLevel.Info)
 
     // Start and Mount App
-    const app = new ViewerApp(api, hostId, appId, bootstrapRole.role, parseSettingsFromQuery(queryParams))
+    const app = new ViewerApp(api, hostId, appId, bootstrapRole.role, parseSettingsFromQuery(queryParams), launchOverlay, launchStateBaseline)
     app.mount(rootElement);
 
     (window as any)["app"] = app
@@ -156,6 +183,8 @@ startApp()
 
 class ViewerApp implements Component {
     private api: Api
+    private hostId: number
+    private appId: number
 
     private sidebar: ViewerSidebar
 
@@ -176,12 +205,54 @@ class ViewerApp implements Component {
     private pendingAutoFullscreenMouseGesture: boolean = false
     private manualFullscreenExitRequested: boolean = false
 
+    private soundGateShown: boolean = false
+    private pageExitHandled: boolean = false
+    private directGameLaunchStarted: boolean = false
+    private directGameLaunchReady: boolean = false
+    private directGameLaunchFailure: string | null = null
+    private reconnectOverlayRunning: boolean = false
+    private launchOverlay: PawpadoLaunchOverlay | null
+    private launchStateBaseline: PawpadoLaunchState | null
+    private activeDirectLaunchId: string | null = null
+    private gameExitWatchTimer: number | null = null
+    private streamEnding = false
+
+    // BioShock Infinite destroys its first window while entering exclusive
+    // fullscreen and can leave desktop duplication without a complete frame
+    // for roughly 9-11 seconds. The WebRTC watchdog deliberately waits 15
+    // seconds before repairing that transition in place, so an 8-second
+    // loading-screen deadline reported a false launch failure before the
+    // recovery path was even allowed to run. Leave enough time for one
+    // watchdog cycle and the repaired frame to arrive while the cover stays
+    // over the desktop.
+    private static readonly DIRECT_GAME_FRAME_TIMEOUT_MS = 35_000
+    private static readonly RECONNECT_FRAME_TIMEOUT_MS = 20_000
+
     private toggleFullscreenWithKeybind: boolean = false
 
     private hasShownFullscreenEscapeWarning = false
+    /** Pawpado game launches enter relative mouse mode on the first trusted
+     * desktop click. Open Desktop intentionally omits the flag. */
+    private pawpadoAutoPointerLock = new URLSearchParams(window.location.search)
+        .get("pawpadoPointerLock") == "1"
 
-    constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>) {
+    constructor(api: Api, hostId: number, appId: number, bootstrapRole: DetailedRole, options?: Partial<Settings>, launchOverlay: PawpadoLaunchOverlay | null = null, launchStateBaseline: PawpadoLaunchState | null = null) {
         this.api = api
+        this.hostId = hostId
+        this.appId = appId
+        this.launchOverlay = launchOverlay
+        this.launchStateBaseline = launchStateBaseline
+
+        this.launchOverlay?.setCancelHandler(async () => {
+            await this.cancelAndReturnToLibrary()
+        })
+        this.launchOverlay?.setRetryHandler(async () => {
+            this.pageExitHandled = true
+            try {
+                await apiHostCancel(this.api, { host_id: this.hostId })
+            } catch { }
+            window.location.reload()
+        })
 
         const defaultSettings = getLocalStreamSettings(bootstrapRole.default_settings)
         const settings = {
@@ -195,6 +266,7 @@ class ViewerApp implements Component {
         Object.assign(this.inputConfig, {
             mouseMode: settings.mouseMode,
             mouseScrollMode: settings.mouseScrollMode,
+            scrollSensitivity: settings.scrollSensitivity,
             touchMode: settings.touchMode,
             localCursorSensitivity: settings.localCursorSensitivity,
             controllerConfig: settings.controllerConfig
@@ -234,7 +306,14 @@ class ViewerApp implements Component {
         this.autoEnterFullscreenOnStart = settings.enterFullscreenOnStreamStart
         this.toggleFullscreenWithKeybind = settings.toggleFullscreenWithKeybind
 
-        this.stream = new Stream(this.api, hostId, appId, settings, [browserWidth, browserHeight], bootstrapRole.permissions)
+        // Apollo destroys and recreates its ViGEm device when a Moonlight
+        // transport is replaced. Windows can assign the replacement to a
+        // different XInput user slot, while a running game continues polling
+        // the original slot. Pawpado controller launches therefore keep the
+        // established transport: a true peer failure is surfaced to the
+        // player instead of silently reconnecting with a different gamepad.
+        const preserveControllerSession = new URLSearchParams(window.location.search).get("pawpadoController") == "1"
+        this.stream = new Stream(this.api, hostId, appId, settings, [browserWidth, browserHeight], bootstrapRole.permissions, preserveControllerSession)
         this.startStream(settings)
 
         // Configure input
@@ -250,14 +329,31 @@ class ViewerApp implements Component {
             }
         })
 
-        // When the page gets destroyed
-        window.addEventListener("beforeunload", async () => {
-            // Stop the current stream
-            await this.stream.stop()
-        })
+        // A Pawpado stream tab owns the app it launched. Cancel the host app
+        // when the tab closes so a later launch cannot resume stale state or
+        // resolution. Do not also close the individual WebRTC transport:
+        // host cancellation already tears it down, and two overlapping
+        // teardown requests can trip Apollo's 10-second termination assert.
+        // `pagehide` covers tab close/mobile navigation; `beforeunload` is a
+        // desktop fallback. The request uses keepalive because unload
+        // handlers cannot be awaited by the browser.
+        const stopOnPageExit = () => {
+            this.stopGameExitWatch()
+            if (this.pageExitHandled) return
+            this.pageExitHandled = true
+
+            void apiHostCancel(
+                this.api,
+                { host_id: this.hostId },
+                { keepalive: true },
+            ).catch(() => { })
+        }
+        window.addEventListener("pagehide", stopOnPageExit)
+        window.addEventListener("beforeunload", stopOnPageExit)
 
         document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
         document.addEventListener("fullscreenchange", this.onFullscreenChange.bind(this))
+        document.addEventListener("webkitfullscreenchange", this.onFullscreenChange.bind(this))
 
         window.addEventListener("gamepadconnected", this.onGamepadConnect.bind(this))
         window.addEventListener("gamepaddisconnected", this.onGamepadDisconnect.bind(this))
@@ -297,11 +393,16 @@ class ViewerApp implements Component {
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))
 
-        // Create connection info modal
-        const connectionInfo = new ConnectionInfoModal()
-        const connectionInfoListener = connectionInfo.onInfo.bind(connectionInfo)
-        this.stream.addInfoListener(connectionInfoListener)
-        showModal(connectionInfo)
+        // Direct game links own a full-screen, game-specific progress surface.
+        // Desktop/system links keep Moonlight's ordinary connection modal.
+        if (this.launchOverlay) {
+            this.launchOverlay.mount(document.body)
+        } else {
+            const connectionInfo = new ConnectionInfoModal()
+            const connectionInfoListener = connectionInfo.onInfo.bind(connectionInfo)
+            this.stream.addInfoListener(connectionInfoListener)
+            showModal(connectionInfo)
+        }
 
         // Start animation frame loop
         this.onTouchUpdate()
@@ -318,16 +419,345 @@ class ViewerApp implements Component {
 
     private async onInfo(event: InfoEvent) {
         const data = event.detail
+        // Pending ICE/frame callbacks cannot reopen or overwrite the closing UI.
+        if (this.streamEnding) return
+        if (this.directGameLaunchFailure && data.type != "streamEnded") return
 
         if (data.type == "app") {
             const appName = data.appName
 
             document.title = `Stream: ${appName}`
+        } else if (data.type == "addDebugLine" && this.launchOverlay) {
+            const line = data.line.trim()
+            if (data.additional?.type == "fatal" || data.additional?.type == "fatalDescription") {
+                this.launchOverlay.fail("Connection failed", this.readableStreamError(line))
+            } else if (data.additional?.type == "informError") {
+                showNotification(line, "error")
+            } else if (
+                data.additional?.type == "recover" ||
+                /media .*reconnecting|falling back to web socket/i.test(line)
+            ) {
+                if (/completed|connected successfully/i.test(line)) {
+                    void this.finishReconnectOverlay()
+                } else if (/restart|reconnect|falling back/i.test(line)) {
+                    if (this.directGameLaunchReady) this.launchOverlay.showReconnect()
+                }
+            }
         } else if (data.type == "connectionComplete") {
             this.sidebar.onCapabilitiesChange(data.capabilities)
 
             this.armFullscreenOnNextInteraction()
+            if (this.launchOverlay) {
+                if (!this.directGameLaunchStarted) {
+                    this.directGameLaunchStarted = true
+                    void this.finishDirectGameLaunch()
+                } else {
+                    void this.finishReconnectOverlay()
+                }
+            } else {
+                this.showIOSSoundGate()
+            }
+        } else if (data.type == "streamEnded") {
+            this.streamEnding = true
+            this.stopGameExitWatch()
+            // Apollo tears down media when a launcher exits unsuccessfully,
+            // too. Its transport packet is not the cause of that failure.
+            await this.readDirectGameLaunchFailure()
+            if (data.graceful && !this.directGameLaunchFailure) this.launchOverlay?.showClosing()
+            // Quit-the-game closes the tab, but ONLY when the embedder asked
+            // for it (?autoclose=1). A ServerTermination packet is the best
+            // signal, but Apollo does not send one on every app-exit path. If
+            // it is absent, confirm that the host is still reachable and no
+            // longer reports this app as current before closing. A dropped
+            // connection must leave the tab open so it can explain the loss.
+            const autoClose = !this.directGameLaunchFailure && await this.shouldAutoClose(data.graceful)
+            // The host app/transport is already gone. Suppress the pagehide
+            // cancel generated by our own auto-close (or by a later manual
+            // close after the end message); it is both redundant and unsafe
+            // while Apollo is still unwinding the first teardown.
+            if (data.graceful || autoClose) {
+                this.pageExitHandled = true
+            }
+            if (autoClose) {
+                if (window.matchMedia('(display-mode: standalone)').matches) {
+                    history.back()
+                } else {
+                    window.close()
+                }
+            }
+            if (this.launchOverlay) {
+                if (this.directGameLaunchFailure) {
+                    this.showDirectGameLaunchFailure()
+                } else if (data.graceful || autoClose) {
+                    this.launchOverlay.end()
+                } else {
+                    this.launchOverlay.fail(
+                        "Connection to the machine was lost",
+                        "The game may still be running. Try reopening it from your library.",
+                    )
+                }
+                return
+            }
+            // Reached when we didn't close — including a window.close() the
+            // browser refused. Without this the player is left staring at
+            // the frozen last frame.
+            await showMessage(data.graceful ? I.stream.streamEnded : I.stream.connectionLost)
         }
+    }
+
+    private readableStreamError(line: string): string {
+        if (!line || /candidate:|ice candidate/i.test(line)) {
+            return "The secure stream could not be established. Try again from your library."
+        }
+        return line.length > 240 ? `${line.slice(0, 237)}…` : line
+    }
+
+    private async readDirectGameLaunchFailure() {
+        if (!this.launchOverlay || this.directGameLaunchFailure) return
+        try {
+            const state = await apiGetPawpadoLaunchState(this.api)
+            if (this.belongsToActiveLaunch(state) && state?.state == "failed") {
+                this.directGameLaunchFailure = state.message || "The game process could not be started."
+            }
+        } catch {
+            // An unreachable status endpoint is not evidence of a game crash.
+        }
+    }
+
+    private showDirectGameLaunchFailure() {
+        if (this.launchOverlay && this.directGameLaunchFailure) {
+            this.launchOverlay.fail(`Couldn’t open ${this.launchOverlay.game.title}`, this.directGameLaunchFailure)
+        }
+    }
+
+    private async waitForMatchingGameProcess(): Promise<void> {
+        if (!this.launchOverlay) return
+        // The host now waits for a real top-level game window rather than
+        // declaring success at process spawn. Leave enough room for that
+        // 180-second window wait, controller (25s), bounded startup-file
+        // preparation (8s), previous-process cleanup (12s), and API margin.
+        const deadline = Date.now() + 240_000
+        let sawState = false
+        while (Date.now() < deadline) {
+            if (this.streamEnding || this.pageExitHandled) throw new Error("Game launch was canceled.")
+            let terminalError: Error | null = null
+            try {
+                const state = await apiGetPawpadoLaunchState(this.api)
+                if (this.streamEnding || this.pageExitHandled) return
+                if (state && this.belongsToActiveLaunch(state)) {
+                    sawState = true
+                    if (state.launchId) this.activeDirectLaunchId = state.launchId
+                    if (state.state == "failed") {
+                        terminalError = new Error(state.message || "The game process could not be started.")
+                    }
+                    if (state.state == "exited") {
+                        terminalError = new Error("The game closed before its first picture was ready.")
+                    }
+                    if (state.state == "preparing" || state.state == "starting" || state.state == "running") {
+                        this.launchOverlay.setLaunchState(state.state, state.message)
+                    }
+                    if (state.state == "running") {
+                        this.startGameExitWatch()
+                        return
+                    }
+                }
+            } catch {
+                // The status file may not exist during the launcher's first
+                // few milliseconds. Keep the secure stream covered and poll.
+            }
+            if (terminalError) throw terminalError
+            await wait(350)
+        }
+        throw new Error(sawState
+            ? `${this.launchOverlay.game.title} did not finish opening in time.`
+            : "The computer did not report game launch progress in time.")
+    }
+
+    private isFreshLaunchState(state: PawpadoLaunchState): boolean {
+        if (!this.launchStateBaseline) return true
+        if (state.launchId && this.launchStateBaseline.launchId) {
+            return state.launchId != this.launchStateBaseline.launchId
+        }
+        return state.updatedAt > this.launchStateBaseline.updatedAt
+    }
+
+    private belongsToActiveLaunch(state: PawpadoLaunchState | null): boolean {
+        return state != null && state.slug == this.launchOverlay?.game.slug &&
+            (this.activeDirectLaunchId != null
+                ? state.launchId == this.activeDirectLaunchId
+                : this.isFreshLaunchState(state))
+    }
+
+    private startGameExitWatch() {
+        if (this.gameExitWatchTimer != null || this.streamEnding || this.pageExitHandled) return
+        // Observe the lightweight launcher record during play, not just after
+        // transport failure. Apollo may finish process/display cleanup after
+        // media ends, and its termination packet can be lost in that interval.
+        this.gameExitWatchTimer = window.setTimeout(async () => {
+            try {
+                const state = await apiGetPawpadoLaunchState(this.api)
+                if (!this.streamEnding && !this.pageExitHandled &&
+                    this.belongsToActiveLaunch(state) && state?.state == "exited") {
+                    this.stream.notifyGameExited()
+                }
+            } catch {
+                // An unreachable host is NOT evidence of a normal game exit.
+            } finally {
+                this.gameExitWatchTimer = null
+                this.startGameExitWatch()
+            }
+        }, 1000)
+    }
+
+    private stopGameExitWatch() {
+        if (this.gameExitWatchTimer != null) window.clearTimeout(this.gameExitWatchTimer)
+        this.gameExitWatchTimer = null
+    }
+
+    private async waitForFreshVideoFrame(timeoutMs: number): Promise<void> {
+        const deadline = Date.now() + timeoutMs
+        let video: HTMLVideoElement | null = null
+        while (Date.now() < deadline) {
+            video = document.querySelector("video.video-stream")
+            if (video) break
+            const canvas = document.querySelector("canvas.video-stream") as HTMLCanvasElement | null
+            if (canvas?.width && canvas.height) {
+                // Canvas pipelines do not expose requestVideoFrameCallback.
+                // Keep the cover up for several presentation intervals after
+                // the process marker rather than revealing the desktop frame.
+                await wait(700)
+                return
+            }
+            await wait(80)
+        }
+        if (!video) throw new Error("The game opened, but no video frame arrived.")
+
+        const frameVideo = video as HTMLVideoElement & {
+            requestVideoFrameCallback?: (callback: () => void) => number
+            cancelVideoFrameCallback?: (id: number) => void
+        }
+        if (!frameVideo.requestVideoFrameCallback) {
+            await wait(700)
+            return
+        }
+        await new Promise<void>((resolve, reject) => {
+            const callbackId = frameVideo.requestVideoFrameCallback!(() => {
+                clearTimeout(timeout)
+                resolve()
+            })
+            const timeout = window.setTimeout(() => {
+                frameVideo.cancelVideoFrameCallback?.(callbackId)
+                reject(new Error("The game opened, but its picture stopped updating."))
+            }, Math.max(1, deadline - Date.now()))
+        })
+    }
+
+    private async finishDirectGameLaunch() {
+        if (!this.launchOverlay) return
+        const controllerReady = this.launchOverlay.waitForController()
+        try {
+            await this.waitForMatchingGameProcess()
+            if (this.streamEnding || this.pageExitHandled) return
+            await this.waitForFreshVideoFrame(ViewerApp.DIRECT_GAME_FRAME_TIMEOUT_MS)
+            await controllerReady
+            if (this.streamEnding || this.pageExitHandled) return
+            if (isIOSWebKit()) await this.launchOverlay.waitForSound(() => this.activateReadyMedia())
+            if (this.streamEnding || this.pageExitHandled) return
+            this.directGameLaunchReady = true
+            this.launchOverlay.hide()
+        } catch (error) {
+            if (this.streamEnding || this.pageExitHandled) return
+            this.directGameLaunchFailure = error instanceof Error ? error.message : "The game did not finish opening."
+            this.showDirectGameLaunchFailure()
+        }
+    }
+
+    private async finishReconnectOverlay() {
+        if (!this.launchOverlay || !this.directGameLaunchReady || this.directGameLaunchFailure || this.streamEnding || this.pageExitHandled || this.reconnectOverlayRunning || !this.launchOverlay.isVisible()) return
+        this.reconnectOverlayRunning = true
+        try {
+            await this.waitForFreshVideoFrame(ViewerApp.RECONNECT_FRAME_TIMEOUT_MS)
+            if (this.streamEnding || this.pageExitHandled) return
+            if (isIOSWebKit()) await this.launchOverlay.waitForSound(() => this.activateReadyMedia())
+            if (this.streamEnding || this.pageExitHandled) return
+            this.launchOverlay.hide()
+        } catch (error) {
+            if (this.streamEnding || this.pageExitHandled) return
+            this.launchOverlay.fail(
+                "The stream could not recover",
+                error instanceof Error ? error.message : "No fresh game picture arrived.",
+            )
+        } finally {
+            this.reconnectOverlayRunning = false
+        }
+    }
+
+    private cancelAndReturnToLibrary() {
+        this.pageExitHandled = true
+        this.stopGameExitWatch()
+        // Navigation cannot wait up to the API's 12-second timeout: doing so
+        // loses the trusted click needed by window.close() and made the button
+        // appear dead during a broken stream. Dispatch cleanup with unload
+        // semantics; the overlay's native link owns the actual navigation.
+        void apiHostCancel(
+            this.api,
+            { host_id: this.hostId },
+            { keepalive: true },
+        ).catch(() => { })
+    }
+
+    private async shouldAutoClose(graceful: boolean): Promise<boolean> {
+        const requested = new URLSearchParams(window.location.search).get("autoclose") == "1"
+        if (!requested) {
+            return false
+        }
+        // Apollo's app undo hook can emit a graceful termination packet
+        // before Windows display/process cleanup has finished. Closing the
+        // tab on that packet made an immediate replay race the old app and
+        // strand a headless game process. Treat graceful as intent, not proof:
+        // require this launch's terminal marker AND Apollo's paired host view
+        // to report that the app slot is actually free.
+        const deadline = Date.now() + (graceful ? 45_000 : 8_000)
+        let launchExited = this.launchOverlay == null
+        while (Date.now() < deadline) {
+            if (this.launchOverlay) {
+                try {
+                    const state = await apiGetPawpadoLaunchState(this.api)
+                    if (state && this.belongsToActiveLaunch(state)) {
+                        if (state.state == "failed") {
+                            this.directGameLaunchFailure = state.message || "The game process could not be started."
+                            return false
+                        }
+                        if (state.state == "preparing" || state.state == "starting" || state.state == "running") {
+                            // A delayed packet from an older teardown must
+                            // never close a newly-started game tab.
+                            return false
+                        }
+                        if (state.state == "exited") {
+                            launchExited = true
+                            this.launchOverlay.showClosing()
+                        }
+                    }
+                } catch {
+                    // Keep waiting. A transient state-file/API miss while the
+                    // host unwinds is not permission to close the page.
+                }
+            }
+
+            if (launchExited) {
+                try {
+                    const host = await apiGetHost(this.api, { host_id: this.hostId }, 2500)
+                    if (host.server_state != null && host.current_game != this.appId) return true
+                } catch {
+                    // Apollo's server-info request can time out while its
+                    // synchronous display cleanup is running. Retry until the
+                    // bounded teardown window expires.
+                }
+            }
+            await wait(500)
+        }
+
+        return false
     }
 
     private focusInput() {
@@ -341,13 +771,84 @@ class ViewerApp implements Component {
         this.focusInput()
 
         this.stream.getVideoRenderer()?.onUserInteraction()
-        this.stream.getAudioPlayer()?.onUserInteraction()
+        void Promise.resolve(this.stream.getAudioPlayer()?.onUserInteraction()).catch(() => { })
+    }
+
+    private activateReadyMedia(): Promise<void> {
+        try {
+            this.stream.getVideoRenderer()?.onUserInteraction()
+            const player = this.stream.getAudioPlayer()
+            if (!player) return Promise.reject(new Error("Audio is not ready"))
+            const activation = player.onUserInteraction()
+            // Start both operations within this same trusted click/tap/Enter.
+            this.consumeAutoFullscreenInteraction()
+            return Promise.resolve(activation)
+        } catch (error) {
+            return Promise.reject(error)
+        }
+    }
+
+    /**
+     * iOS does not treat a hardware gamepad button as an autoplay gesture.
+     * Our Safari audio pipeline consequently remains suspended (and drops
+     * PCM before its first interaction) when somebody plays controller-only.
+     * Ask for one explicit tap after the audio player exists, then resume it
+     * synchronously inside that gesture.
+     */
+    private showIOSSoundGate() {
+        if (!isIOSWebKit() || this.soundGateShown || !document.body) return
+        this.soundGateShown = true
+
+        const overlay = document.createElement("section")
+        overlay.setAttribute("role", "dialog")
+        overlay.setAttribute("aria-modal", "true")
+        overlay.setAttribute("aria-labelledby", "sound-gate-title")
+        overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;box-sizing:border-box;padding:24px;background:rgba(16,13,12,.96);color:#f7f3ef;font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;touch-action:manipulation"
+
+        const button = document.createElement("button")
+        button.type = "button"
+        button.style.cssText = "width:min(420px,100%);box-sizing:border-box;border:1px solid rgba(255,255,255,.16);border-radius:18px;background:#1b1614;color:#f7f3ef;padding:28px 24px;box-shadow:0 24px 80px rgba(0,0,0,.55);font:inherit;text-align:center;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent"
+        button.innerHTML = "<strong id=\"sound-gate-title\" style=\"display:block;font-size:22px;line-height:1.25\">Play with sound</strong><span style=\"display:block;margin-top:9px;color:#c9bdb4\">Click, tap, or press Enter to enable game audio.</span>"
+        overlay.appendChild(button)
+
+        let finished = false
+        const enter = (event: Event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            if (finished) return
+            finished = true
+            // Keep this synchronous: Safari only permits play()/resume()
+            // while the tap's transient activation is still live.
+            void this.activateReadyMedia().then(() => overlay.remove(), () => {
+                finished = false
+                button.textContent = "Sound could not start. Click or tap to try again."
+            })
+        }
+        // ViewerApp owns document-level touch handlers that intentionally
+        // prevent synthetic clicks. Consume the real touch here instead.
+        stopPropagationOn(overlay)
+        button.addEventListener("click", enter)
+        document.body.appendChild(overlay)
+        button.focus()
     }
 
     // -- Auto Fullscreen
     private armFullscreenOnNextInteraction() {
-        if (this.autoEnterFullscreenOnStart) {
+        // iPhone Safari exposes neither page-fullscreen entry point. Arming
+        // anyway consumed the tap before onUserInteraction could unlock
+        // Web Audio, showed the unsupported warning, then re-armed forever.
+        // Manual fullscreen can still explain the Home Screen alternative;
+        // the automatic path must never steal input it cannot use.
+        const target = (document.body ?? document.documentElement) as HTMLElement & {
+            webkitRequestFullscreen?: () => Promise<void> | void
+        }
+        const canRequest = Boolean(target) &&
+            (typeof target.requestFullscreen == "function" ||
+                typeof target.webkitRequestFullscreen == "function")
+        if (this.autoEnterFullscreenOnStart && canRequest) {
             this.fullscreenOnNextInteractionArmed = true
+        } else {
+            this.fullscreenOnNextInteractionArmed = false
         }
     }
     private consumeAutoFullscreenInteraction(): boolean {
@@ -409,7 +910,6 @@ class ViewerApp implements Component {
     onKeyDown(event: KeyboardEvent) {
         this.onUserInteraction()
 
-        console.debug(event)
         if (event.shiftKey && event.ctrlKey && event.code == "KeyV") {
             // We are likely pasting -> don't send keys
         } else if (event.code == "F11") {
@@ -460,6 +960,7 @@ class ViewerApp implements Component {
 
     // Mouse
     onMouseButtonDown(event: MouseEvent) {
+        this.onUserInteraction()
         if (this.consumeAutoFullscreenInteraction()) {
             this.pendingAutoFullscreenMouseGesture = true
             event.preventDefault()
@@ -467,7 +968,18 @@ class ViewerApp implements Component {
             return
         }
 
-        this.onUserInteraction()
+        const pointerLockSupported = typeof document.getElementById("input")?.requestPointerLock == "function"
+        if (this.pawpadoAutoPointerLock && pointerLockSupported && !document.pointerLockElement) {
+            event.preventDefault()
+            event.stopPropagation()
+            void this.requestPointerLock(true).catch(error => {
+                this.pawpadoAutoPointerLock = false
+                this.inputConfig.mouseMode = this.previousMouseMode
+                this.setInputConfig(this.inputConfig)
+                console.warn("failed to enter Pawpado pointer lock", error)
+            })
+            return
+        }
 
         event.preventDefault()
         this.stream.getInput().onMouseDown(event, this.getStreamRect());
@@ -503,7 +1015,7 @@ class ViewerApp implements Component {
     }
     onMouseWheel(event: WheelEvent) {
         event.preventDefault()
-        this.stream.getInput().onMouseWheel(event)
+        this.stream.getInput().onMouseWheel(event, this.getStreamRect())
 
         event.stopPropagation()
     }
@@ -529,13 +1041,12 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onTouchEnd(event: TouchEvent) {
+        this.onUserInteraction()
         if (this.consumeAutoFullscreenTouchGesture()) {
             event.preventDefault()
             event.stopPropagation()
             return
         }
-
-        this.onUserInteraction()
 
         event.preventDefault()
         this.stream.getInput().onTouchEnd(event, this.getStreamRect())
@@ -597,9 +1108,17 @@ class ViewerApp implements Component {
 
     // Fullscreen
     async requestFullscreen(showEscapeWarning: boolean = true) {
-        const body = document.body
-        if (body) {
-            if (!("requestFullscreen" in body && typeof body.requestFullscreen == "function")) {
+        const target = (document.body ?? document.documentElement) as HTMLElement & {
+            webkitRequestFullscreen?: () => Promise<void> | void
+        }
+        if (target) {
+            const standardRequest = typeof target.requestFullscreen == "function"
+                ? target.requestFullscreen.bind(target)
+                : null
+            const webkitRequest = typeof target.webkitRequestFullscreen == "function"
+                ? target.webkitRequestFullscreen.bind(target)
+                : null
+            if (!standardRequest && !webkitRequest) {
                 await showMessage(I.stream.fullscreenUnsupported)
 
                 return
@@ -609,9 +1128,11 @@ class ViewerApp implements Component {
 
             if (!this.isFullscreen()) {
                 try {
-                    await body.requestFullscreen({
-                        navigationUI: "hide"
-                    })
+                    if (standardRequest) {
+                        await standardRequest({ navigationUI: "hide" })
+                    } else {
+                        await webkitRequest!()
+                    }
                 } catch (e) {
                     console.warn("failed to request fullscreen", e)
                 }
@@ -627,7 +1148,7 @@ class ViewerApp implements Component {
                 console.warn("Keyboard lock failed, skipping notification.", e);
             }
 
-            if (this.getStream()?.getInput().getConfig().mouseMode == "relative") {
+            if (this.pawpadoAutoPointerLock || this.getStream()?.getInput().getConfig().mouseMode == "relative") {
                 await this.requestPointerLock()
             }
 
@@ -651,12 +1172,20 @@ class ViewerApp implements Component {
             await navigator.keyboard.unlock()
         }
 
-        if ("exitFullscreen" in document && typeof document.exitFullscreen == "function") {
+        const webkitDocument = document as Document & {
+            webkitExitFullscreen?: () => Promise<void> | void
+        }
+        if (typeof document.exitFullscreen == "function") {
             await document.exitFullscreen()
+        } else if (typeof webkitDocument.webkitExitFullscreen == "function") {
+            await webkitDocument.webkitExitFullscreen()
         }
     }
     isFullscreen(): boolean {
-        return "fullscreenElement" in document && !!document.fullscreenElement
+        const webkitDocument = document as Document & {
+            webkitFullscreenElement?: Element | null
+        }
+        return !!(document.fullscreenElement ?? webkitDocument.webkitFullscreenElement)
     }
     private async onFullscreenChange() {
         if (this.isFullscreen()) {
@@ -744,8 +1273,7 @@ class ViewerApp implements Component {
 
     // -- Fully immersed Fullscreen -> Fullscreen API + Pointer Lock
     private checkFullyImmersed() {
-        if ("pointerLockElement" in document && document.pointerLockElement &&
-            "fullscreenElement" in document && document.fullscreenElement) {
+        if ("pointerLockElement" in document && document.pointerLockElement && this.isFullscreen()) {
             // We're fully immersed -> remove sidebar
             setSidebar(null)
         } else {
@@ -892,115 +1420,6 @@ class ViewerApp implements Component {
     }
 }
 
-class ConnectionInfoModal implements Modal<void> {
-
-    private eventTarget = new EventTarget()
-
-    private root = document.createElement("div")
-
-    private textTy: LogMessageType | null = null
-    private text = document.createElement("p")
-
-    private options = document.createElement("div")
-    private debugDetailButton = document.createElement("button")
-    private closeButton = document.createElement("button")
-
-    private debugDetail = "" // We store this seperate because line breaks don't work when the element is not mounted on the dom
-    private debugDetailDisplay = document.createElement("div")
-
-    constructor() {
-        this.root.classList.add("modal-video-connect")
-
-        this.text.innerText = I.stream.connecting
-        this.root.appendChild(this.text)
-
-        this.root.appendChild(this.options)
-        this.options.classList.add("modal-video-connect-options")
-
-        this.debugDetailButton.innerText = I.stream.showLogs
-        this.debugDetailButton.addEventListener("click", this.onDebugDetailClick.bind(this))
-        this.options.appendChild(this.debugDetailButton)
-
-        this.closeButton.innerText = I.stream.close
-        this.closeButton.addEventListener("click", this.onClose.bind(this))
-        this.options.appendChild(this.closeButton)
-
-        this.debugDetailDisplay.classList.add("textlike")
-        this.debugDetailDisplay.classList.add("modal-video-connect-debug")
-    }
-
-    private onDebugDetailClick() {
-        let debugDetailCurrentlyShown = this.root.contains(this.debugDetailDisplay)
-
-        if (debugDetailCurrentlyShown) {
-            this.debugDetailButton.innerText = I.stream.showLogs
-            this.root.removeChild(this.debugDetailDisplay)
-        } else {
-            this.debugDetailButton.innerText = I.stream.hideLogs
-            this.root.appendChild(this.debugDetailDisplay)
-            this.debugDetailDisplay.innerText = this.debugDetail
-        }
-    }
-
-    private debugLog(line: string) {
-        this.debugDetail += `${line}\n`
-        this.debugDetailDisplay.innerText = this.debugDetail
-        console.info(`[Stream]: ${line}`)
-    }
-
-    onInfo(event: InfoEvent) {
-        const data = event.detail
-
-        if (data.type == "connectionComplete") {
-            const text = I.stream.connectionComplete
-            this.text.innerText = text
-            this.debugLog(text)
-
-            showModal(null)
-        } else if (data.type == "addDebugLine") {
-            const message = data.line.trim()
-            if (message) {
-                this.debugLog(message)
-
-                if (!this.textTy) {
-                    this.text.innerText = message
-                    this.textTy = data.additional?.type ?? null
-                } else if (data.additional?.type == "fatalDescription" || data.additional?.type == "ifErrorDescription") {
-                    if (this.text.innerText) {
-                        this.text.innerText += "\n" + message
-                    } else {
-                        this.text.innerText = message
-                    }
-                    this.textTy = data.additional.type
-                }
-            }
-
-            if (data.additional?.type == "fatal" || data.additional?.type == "fatalDescription") {
-                showModal(this)
-            } else if (data.additional?.type == "informError") {
-                showNotification(data.line)
-            }
-        }
-    }
-
-    onClose() {
-        showModal(null)
-    }
-
-    onFinish(abort: AbortSignal): Promise<void> {
-        return new Promise((resolve, reject) => {
-            this.eventTarget.addEventListener("ml-connected", () => resolve(), { once: true, signal: abort })
-        })
-    }
-
-    mount(parent: HTMLElement): void {
-        parent.appendChild(this.root)
-    }
-    unmount(parent: HTMLElement): void {
-        parent.removeChild(this.root)
-    }
-}
-
 class ViewerSidebar implements Component, Sidebar {
     private app: ViewerApp
 
@@ -1021,6 +1440,8 @@ class ViewerSidebar implements Component, Sidebar {
     private exitStreamButton = document.createElement("button")
 
     private mouseMode: SelectComponent
+    private scrollMode: SelectComponent
+    private scrollSensitivity: SelectComponent
     private touchMode: SelectComponent
 
     constructor(app: ViewerApp) {
@@ -1134,6 +1555,18 @@ class ViewerSidebar implements Component, Sidebar {
         this.mouseMode.addChangeListener(this.onMouseModeChange.bind(this))
         this.mouseMode.mount(this.div)
 
+        this.scrollMode = new SelectComponent("liveScrollMode", [
+            { value: "highres", name: I.settings.highRes },
+            { value: "normal", name: I.settings.normal },
+        ], { displayName: I.settings.scrollMode, preSelectedOption: this.app.getInputConfig().mouseScrollMode })
+        this.scrollMode.addChangeListener(() => this.updateScrollSettings())
+        this.scrollMode.mount(this.div)
+        this.scrollSensitivity = new SelectComponent("liveScrollSensitivity", Array.from({ length: 16 }, (_, index) => (index + 1) / 4).map(value => ({ value: String(value), name: `${value}×` })), {
+            displayName: I.settings.scrollSensitivity, preSelectedOption: String(this.app.getInputConfig().scrollSensitivity),
+        })
+        this.scrollSensitivity.addChangeListener(() => this.updateScrollSettings())
+        this.scrollSensitivity.mount(this.div)
+
         // Select Touch Mode
         this.touchMode = new SelectComponent("touchMode", [
             { value: "touch", name: I.stream.touch },
@@ -1176,6 +1609,21 @@ class ViewerSidebar implements Component, Sidebar {
     }
 
     // -- Mouse Mode
+    private updateScrollSettings() {
+        const config = { ...this.app.getInputConfig(),
+            mouseScrollMode: this.scrollMode.getValue() === "normal" ? "normal" as const : "highres" as const,
+            scrollSensitivity: Number(this.scrollSensitivity.getValue()),
+        }
+        this.app.setInputConfig(config)
+        // Store only these preferences; don't overwrite unrelated settings.
+        try {
+            const saved = JSON.parse(localStorage.getItem("mlSettings") || "{}")
+            saved.mouseScrollMode = config.mouseScrollMode
+            saved.scrollSensitivity = config.scrollSensitivity
+            localStorage.setItem("mlSettings", JSON.stringify(saved))
+        } catch { /* live settings still work when storage is unavailable */ }
+    }
+
     private onMouseModeChange() {
         const config = this.app.getInputConfig()
         config.mouseMode = this.mouseMode.getValue() as any
@@ -1257,24 +1705,4 @@ class SendKeycodeModal extends FormModal<number> {
 
         return parseInt(keyString)
     }
-}
-
-// Stop propagation so the stream doesn't get it
-function stopPropagationOn(element: HTMLElement) {
-    element.addEventListener("keydown", onStopPropagation)
-    element.addEventListener("keyup", onStopPropagation)
-    element.addEventListener("keypress", onStopPropagation)
-    element.addEventListener("click", onStopPropagation)
-    element.addEventListener("mousedown", onStopPropagation)
-    element.addEventListener("mouseup", onStopPropagation)
-    element.addEventListener("mousemove", onStopPropagation)
-    element.addEventListener("wheel", onStopPropagation)
-    element.addEventListener("contextmenu", onStopPropagation)
-    element.addEventListener("touchstart", onStopPropagation)
-    element.addEventListener("touchmove", onStopPropagation)
-    element.addEventListener("touchend", onStopPropagation)
-    element.addEventListener("touchcancel", onStopPropagation)
-}
-function onStopPropagation(event: Event) {
-    event.stopPropagation()
 }

@@ -20,3 +20,6 @@ web/uniffi
 server
 
 /.idea
+
+# Local visual harness build output (webpack.harness.js)
+dist-harness/

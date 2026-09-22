@@ -392,8 +392,8 @@ export async function apiDeleteRole(api: Api, query: DeleteRoleQuery): Promise<v
 export async function apiGetHosts(api: Api): Promise<StreamedJsonResponse<GetHostsResponse, UndetailedHost>> {
     return await fetchApi<GetHostsResponse, UndetailedHost>(api, "/hosts", GET, { response: "jsonStreaming" })
 }
-export async function apiGetHost(api: Api, query: GetHostQuery): Promise<DetailedHost> {
-    const response = await fetchApi(api, "/host", GET, { query })
+export async function apiGetHost(api: Api, query: GetHostQuery, timeout?: number): Promise<DetailedHost> {
+    const response = await fetchApi(api, "/host", GET, { query }, timeout)
 
     return (response as GetHostResponse).host
 }
@@ -443,12 +443,37 @@ export async function apiGetAppImage(api: Api, query: GetAppImageQuery): Promise
     return await response.blob()
 }
 
-export async function apiHostCancel(api: Api, request: PostCancelRequest): Promise<PostCancelResponse> {
+export async function apiHostCancel(
+    api: Api,
+    request: PostCancelRequest,
+    options?: { keepalive?: boolean },
+): Promise<PostCancelResponse> {
     const response = await fetchApi(api, "/host/cancel", POST, {
-        json: request
+        json: request,
+        keepalive: options?.keepalive,
     })
 
     return response as PostCancelResponse
+}
+
+export type PawpadoLaunchState = {
+    slug: string
+    title: string
+    /** Unique owner for one launcher invocation. Older hosts omit it. */
+    launchId?: string
+    state: "preparing" | "starting" | "running" | "exited" | "failed"
+    updatedAt: number
+    pid: number | null
+    message: string | null
+}
+
+/** Read Pawpado's fixed, launcher-owned progress record from this host. */
+export async function apiGetPawpadoLaunchState(api: Api): Promise<PawpadoLaunchState | null> {
+    const response = await fetchApi(api, "/launch-state", GET, { response: "ignore" }, 2500)
+    if (response.status == 204) {
+        return null
+    }
+    return await response.json() as PawpadoLaunchState
 }
 
 export type WebRTCConfiguration = {
@@ -493,10 +518,24 @@ export type WebRTCAnswer = {
     location: string | null,
 }
 
-export async function apiWebRTCOffer(api: Api, offerSdp: string): Promise<WebRTCAnswer> {
+export async function apiWebRTCOffer(
+    api: Api,
+    offerSdp: string,
+    stream: {
+        gamepads: { attached: number, persistAfterDisconnect: boolean },
+        resumeCurrentApp: boolean,
+    },
+): Promise<WebRTCAnswer> {
     const ENDPOINT = "/host/stream/webrtc"
 
-    const [url, request] = buildRequest(api, ENDPOINT, POST, { sdp: offerSdp })
+    const [url, request] = buildRequest(api, ENDPOINT, POST, {
+        sdp: offerSdp,
+        query: {
+            gamepads_attached: stream.gamepads.attached,
+            gamepads_persist_after_disconnect: stream.gamepads.persistAfterDisconnect,
+            resume_current_app: stream.resumeCurrentApp,
+        },
+    })
 
     let response
     try {

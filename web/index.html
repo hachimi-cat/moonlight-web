@@ -31,6 +31,9 @@
             document.documentElement.classList.add("notranslate");
         } catch (_err) { }
     </script>
+    <!-- Serves window.__RUNTIME_CONFIG__ (url_path_prefix). Must load BEFORE
+         the bundle: webpack maps ./config.js to that global. -->
+    <script src="config.js"></script>
 </head>
 
 <body>

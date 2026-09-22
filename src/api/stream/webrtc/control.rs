@@ -93,7 +93,7 @@ impl ControlChannel {
 
         Ok(Self::new(
             Protocol::Simple {
-                config: create_control_packet_config(),
+                config: create_control_packet_config(true),
                 dispatched_active: false,
                 send_queue: Default::default(),
             },
@@ -241,7 +241,14 @@ impl ControlChannel {
                                     ControlPeerConfig {
                                         role: ControlPeerRole::Server,
                                         encryption: None,
-                                        packets: create_control_packet_config(),
+                                        // The ENet control stream between the relay and browser
+                                        // has no Moonlight control encryption. WebRTC already
+                                        // protects the data channel, and the browser constructs
+                                        // its ControlStream with `encryption: None`. Packet IDs
+                                        // differ for encrypted v7 streams (for example,
+                                        // ServerTermination is 0x0109 instead of 0x0100), so this
+                                        // must match the browser's unencrypted ENet peer.
+                                        packets: create_control_packet_config(false),
                                     },
                                 ) {
                                     warn!(error = %err, peer_id = ?id,"failed to configure remote control peer");

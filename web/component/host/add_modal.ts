@@ -1,6 +1,6 @@
 import { PostHostRequest } from "../../api_bindings"
 import { getCurrentLanguage, getTranslations } from "../../i18n"
-import { InputComponent } from "../input"
+import { ShadcnInputComponent as InputComponent } from "../../ui/shadcn-input"
 import { FormModal } from "../modal/form"
 
 export class AddHostModal extends FormModal<PostHostRequest> {
