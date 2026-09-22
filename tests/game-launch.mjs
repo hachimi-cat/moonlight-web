@@ -96,7 +96,9 @@ for (const engine of [chromium, webkit]) {
     });
     await page.getByText(launch.message, { exact: true }).waitFor();
     await page.evaluate(() => { window.app.cancelAndReturnToLibrary(); });
-    await page.waitForFunction(() => window.pollDone, null, { timeout: 2000 });
+    // The already-issued launch-state request has its own 2.5s timeout;
+    // cancellation stops further polls, not that in-flight HTTP request.
+    await page.waitForFunction(() => window.pollDone, null, { timeout: 5000, polling: 50 });
     console.log(`PASS ${engine.name()}-cancel-stops-pending-launch-poll`);
 
     await reset();
@@ -107,7 +109,7 @@ for (const engine of [chromium, webkit]) {
     });
     await page.getByText(launch.message, { exact: true }).waitFor();
     await page.evaluate(() => window.expireLaunch());
-    await page.waitForFunction(() => window.pollDone, null, { timeout: 2000 });
+    await page.waitForFunction(() => window.pollDone, null, { timeout: 5000, polling: 50 });
     assert.match(await page.evaluate(() => window.pollError), /did not finish opening in time/);
     console.log(`PASS ${engine.name()}-launch-wait-remains-bounded`);
   } finally {
