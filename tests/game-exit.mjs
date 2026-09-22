@@ -85,6 +85,7 @@ for (const engine of [chromium, webkit]) {
       app.streamEnding = false;
       app.pageExitHandled = false;
       app.reconnectOverlayRunning = false;
+      app.directGameLaunchReady = true;
       app.launchOverlay.showReconnect();
       app.waitForFreshVideoFrame = () => new Promise((_resolve, reject) => { window.failFrame = reject; });
       window.finishingRecovery = app.finishReconnectOverlay();

@@ -199,7 +199,7 @@ export class PawpadoLaunchOverlay {
         this.root.classList.remove("pw-game-launch-failed", "pw-game-launch-reconnect")
         this.progress.hidden = false
         if (state == "preparing") {
-            this.status.textContent = "Preparing controls…"
+            this.status.textContent = "Preparing your game…"
             this.detail.textContent = message || "Setting up the game on your computer."
         } else if (state == "starting") {
             this.status.textContent = `Opening ${this.game.title}…`
